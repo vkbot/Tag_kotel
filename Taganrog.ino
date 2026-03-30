@@ -963,7 +963,8 @@ else if (cmd.startsWith("/work ")) {
 
 else if (cmd == "/auto") {
     workModeEnabled = false;
-    sendMsg("✅ Режим: АВТО (по расписанию)", cid);
+    startAutoModeWorkDurationOverride();
+    sendMsg("✅ Режим: АВТО (по расписанию). Лимит работы: 14 мин на 1 час", cid);
 }
     else
     {
