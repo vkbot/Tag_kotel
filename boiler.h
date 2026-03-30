@@ -14,6 +14,8 @@ float lastAvgTemp = NAN; // актуальное среднее
 const float TEMP_VALID_MIN = -35.0;
 const float TEMP_VALID_MAX = 85.0;
 const float TEMP_MAX_STEP = 3.0; // защита от резких выбросов за 30 секунд
+const uint8_t TEMP_SPIKE_REJECT_LIMIT = 3; // после серии отклонений принимаем новое базовое значение
+uint8_t tempSpikeRejectCount = 0;
 // === ВНЕШНИЕ ЗАВИСИМОСТИ (из sht_tag.ino) ===
 extern void serialToTelegram(const String &message);
 extern void reportError(const String &message);
@@ -343,7 +345,20 @@ void updateAverageTemperature() {
   if (!isValidTemperature(t)) return;
 
   if (isValidTemperature(lastAvgTemp) && fabs(t - lastAvgTemp) > TEMP_MAX_STEP) {
-    return; // отбрасываем резкий выброс
+    tempSpikeRejectCount++;
+    lastTempReadTime = now; // даже при отклонении двигаем окно проверки, чтобы фильтр мог восстановиться
+
+    if (tempSpikeRejectCount < TEMP_SPIKE_REJECT_LIMIT) {
+      return; // отбрасываем резкий выброс
+    }
+
+    // Считаем, что это смена реального режима/уровня: сбрасываем историю и принимаем новое значение
+    for (uint8_t i = 0; i < TEMP_HISTORY_SIZE; i++) {
+      tempHistory[i] = NAN;
+    }
+    tempHistoryIndex = 0;
+  } else {
+    tempSpikeRejectCount = 0;
   }
 
   tempHistory[tempHistoryIndex] = t;
