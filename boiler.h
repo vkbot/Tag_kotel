@@ -60,6 +60,12 @@ unsigned long lastRelayOnTime = 0;        // ← НОВОЕ: время посл
 bool relayIsRunning = false;              // флаг: реле активно (включено и работает)
 uint16_t workDurationMinutes = 4;         // макс. время работы (настраивается)
 uint32_t minStartInterval = 10 * 60 * 1000UL;
+
+const uint16_t AUTO_MODE_WORK_DURATION_MINUTES = 14;
+const unsigned long AUTO_MODE_WORK_DURATION_PERIOD = 60UL * 60UL * 1000UL; // 1 час
+bool autoModeWorkDurationOverrideActive = false;
+unsigned long autoModeWorkDurationOverrideStart = 0;
+uint16_t workDurationBeforeAutoOverride = 4;
 TimeSlot timeZones[MAX_ZONES];
 uint8_t zoneCount = 0;
 bool zonesChanged = false;
@@ -186,6 +192,29 @@ bool sendRelayCommand(bool on) {
   }
 }
 
+void startAutoModeWorkDurationOverride() {
+  if (!autoModeWorkDurationOverrideActive) {
+    workDurationBeforeAutoOverride = workDurationMinutes;
+    workDurationMinutes = AUTO_MODE_WORK_DURATION_MINUTES;
+    autoModeWorkDurationOverrideActive = true;
+  }
+
+  autoModeWorkDurationOverrideStart = millis();
+}
+
+void updateAutoModeWorkDurationOverride() {
+  if (!autoModeWorkDurationOverrideActive) return;
+
+  if (millis() - autoModeWorkDurationOverrideStart >= AUTO_MODE_WORK_DURATION_PERIOD) {
+    workDurationMinutes = workDurationBeforeAutoOverride;
+    autoModeWorkDurationOverrideActive = false;
+    sendMsg(
+      "⏱ Временный лимит 14 мин завершён. Возвращено значение: " + String(workDurationMinutes) + " мин",
+      String(lastUserChatID)
+    );
+  }
+}
+
 void updateRelay() {
   // Если термостат выключен — выключаем реле
   if (!thermostatEnabled) {
@@ -292,6 +321,7 @@ void updateAverageTemperature() {
 }
 void boilerLoop() {
   updateAverageTemperature(); // <-- добавлено
+  updateAutoModeWorkDurationOverride();
   static unsigned long lastUpdate = 0;
   static unsigned long lastSave = 0;
 
@@ -322,7 +352,8 @@ void boilerLoop() {
     if (intervalOver) {
         workModeEnabled = false;   // выключаем режим работы
         workScheduled = false;     // интервал завершён
-        sendMsg("✅ Временной интервал работы окончен. Переключаемся в АВТО", String(lastUserChatID));
+        startAutoModeWorkDurationOverride();
+        sendMsg("✅ Временной интервал работы окончен. Переключаемся в АВТО: 14 мин на 1 час", String(lastUserChatID));
     }
 }
 
