@@ -493,14 +493,16 @@ void setup()
     String rawText = msg.text;
     rawText.trim();
 
-    String cmd = rawText;
-    int firstSpace = cmd.indexOf(' ');
-    int mentionPos = cmd.indexOf('@');
+    int firstSpace = rawText.indexOf(' ');
+    int mentionPos = rawText.indexOf('@');
     if (mentionPos != -1 && (firstSpace == -1 || mentionPos < firstSpace)) {
-        String head = cmd.substring(0, mentionPos);
-        String tail = (firstSpace == -1) ? "" : cmd.substring(firstSpace);
-        cmd = head + tail;
+        String head = rawText.substring(0, mentionPos);
+        String tail = (firstSpace == -1) ? "" : rawText.substring(firstSpace);
+        rawText = head + tail;
+        rawText.trim();
     }
+
+    String cmd = rawText;
     cmd.toLowerCase();
     cmd.trim();
 
