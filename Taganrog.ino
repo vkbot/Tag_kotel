@@ -590,7 +590,7 @@ void setup()
     String rawText = msg.text;
     rawText.trim();
 
-    // --- 6. Обрабатываем только Telegram-команды ---
+    // --- 6. Merge-resolve: обрабатываем команды в любых чатах, но только сообщения вида /command ---
     if (rawText.length() == 0 || rawText.charAt(0) != '/') return;
 
     int firstSpace = rawText.indexOf(' ');
