@@ -8,7 +8,6 @@
 #include <Ticker.h>
 #include <ArduinoJson.h>
 #include <ESP8266HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <ArduinoOTA.h>
 #include "boiler.h"
 
@@ -85,75 +84,7 @@ String urlencode(const String& str) {
   return encoded;
 }
 
-enum TelegramEndpointMode : uint8_t {
-  TELEGRAM_ENDPOINT_API = 0,
-  TELEGRAM_ENDPOINT_CF = 1
-};
-
-TelegramEndpointMode activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-unsigned long lastTelegramEndpointCheck = 0;
-const unsigned long TELEGRAM_ENDPOINT_CHECK_INTERVAL_MS = 60000;
-
-bool isHttpsHostReachable(const char* host, uint16_t port = 443) {
-  WiFiClientSecure testClient;
-  testClient.setInsecure();
-  testClient.setTimeout(2500);
-  bool connected = testClient.connect(host, port);
-  testClient.stop();
-  return connected;
-}
-
-bool sendViaCloudflareWorker(const String& text, const String& chatId) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  WiFiClientSecure secureClient;
-  secureClient.setInsecure();
-
-  HTTPClient http;
-  String url = "https://royal-river-71a9.dragonforceedge.workers.dev/bot" + String(BOT_TOKEN) +
-               "/sendMessage?chat_id=" + chatId +
-               "&text=" + urlencode(text);
-
-  http.setTimeout(5000);
-  if (!http.begin(secureClient, url)) {
-    return false;
-  }
-
-  int httpCode = http.GET();
-  bool success = (httpCode > 0 && httpCode < 400);
-  http.end();
-  return success;
-}
-
-void refreshTelegramEndpoint(bool force = false) {
-  if (!force && (millis() - lastTelegramEndpointCheck < TELEGRAM_ENDPOINT_CHECK_INTERVAL_MS)) return;
-  lastTelegramEndpointCheck = millis();
-
-  TelegramEndpointMode prevMode = activeTelegramEndpoint;
-  bool apiOk = isHttpsHostReachable("api.telegram.org");
-  bool cfOk = isHttpsHostReachable("royal-river-71a9.dragonforceedge.workers.dev");
-
-  if (apiOk) activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-  else if (cfOk) activeTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
-
-  if (prevMode != activeTelegramEndpoint) {
-    Serial.println(activeTelegramEndpoint == TELEGRAM_ENDPOINT_API
-      ? "✅ Telegram endpoint switched to api.telegram.org"
-      : "✅ Telegram endpoint switched to Cloudflare Worker");
-  }
-}
-
 void sendMsg(String text, String chatId) {
-  refreshTelegramEndpoint();
-
-  if (activeTelegramEndpoint == TELEGRAM_ENDPOINT_CF) {
-    if (!sendViaCloudflareWorker(text, chatId)) {
-      activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-      bot.sendMessage(urlencode(text), chatId);
-    }
-    return;
-  }
-
   bot.sendMessage(urlencode(text), chatId);
 }
 // === Защита от дубликатов и спама ===
@@ -407,7 +338,6 @@ void setup()
     }
     else
     {
-        refreshTelegramEndpoint(true);
         delay(5000);
         sendMsg("ok", "-1001819803857");
         narodmonTicker.attach(303, narodmonTick);
