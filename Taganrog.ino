@@ -96,6 +96,14 @@ bool telegramEndpointManualMode = false;
 bool isEndpointNotifyInProgress = false;
 unsigned long lastTelegramEndpointCheck = 0;
 const unsigned long TELEGRAM_ENDPOINT_CHECK_INTERVAL_MS = 60000;
+const bool FASTBOT_UPDATES_VIA_CF_SUPPORTED = false;
+
+String getTelegramUpdatesRouteInfo() {
+  if (FASTBOT_UPDATES_VIA_CF_SUPPORTED) {
+    return "📥 getUpdates: через выбранный Telegram endpoint";
+  }
+  return "📥 getUpdates: через api.telegram.org (ограничение FastBot)";
+}
 
 bool isHttpsHostReachable(const char* host, uint16_t port = 443) {
   WiFiClientSecure testClient;
@@ -745,7 +753,7 @@ void setup()
         {
             String mode = telegramEndpointManualMode ? "MANUAL" : "AUTO";
             String endpoint = (activeTelegramEndpoint == TELEGRAM_ENDPOINT_API) ? "api.telegram.org" : "Cloudflare Worker";
-            sendMsg("🌐 Режим отправки: " + mode + "\nТекущий сервер: " + endpoint, cid);
+            sendMsg("🌐 Режим отправки: " + mode + "\nТекущий сервер: " + endpoint + "\n" + getTelegramUpdatesRouteInfo(), cid);
         }
         else if (tgArgs == "auto")
         {
@@ -771,7 +779,7 @@ void setup()
             telegramEndpointManualMode = true;
             manualTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
             activeTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
-            sendMsg("✅ Режим Telegram-сервера: MANUAL (Cloudflare Worker)", cid);
+            sendMsg("✅ Режим Telegram-сервера: MANUAL (Cloudflare Worker)\n" + getTelegramUpdatesRouteInfo(), cid);
             if (previous != activeTelegramEndpoint)
             {
                 notifyEndpointChange(previous, activeTelegramEndpoint, true, cid);
