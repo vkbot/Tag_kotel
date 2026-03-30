@@ -129,7 +129,7 @@ bool sendViaCloudflareWorker(const String& text, const String& chatId) {
 }
 
 void sendViaTelegramApi(const String& text, const String& chatId) {
-  bot.sendMessage(urlencode(text), chatId);
+  bot.sendMessage(text, chatId);
 }
 
 void notifyEndpointChange(TelegramEndpointMode fromMode, TelegramEndpointMode toMode, bool manualSwitch) {
@@ -485,13 +485,23 @@ void setup()
     // --- 5. Ждём 5 сек после старта ---
     if (millis() - startupTime < startupDelay) return;
 
-    // --- 6. Игнорируем группы (если нужно) ---
-    if (msg.chatID == "-1001819803857") return;
+    // --- 6. Слушаем команды только в личке с ботом ---
+    if (msg.chatID.startsWith("-")) return;
 
     String cid = msg.chatID;
     String rawText = msg.text;
+    rawText.trim();
+
     String cmd = rawText;
+    int firstSpace = cmd.indexOf(' ');
+    int mentionPos = cmd.indexOf('@');
+    if (mentionPos != -1 && (firstSpace == -1 || mentionPos < firstSpace)) {
+        String head = cmd.substring(0, mentionPos);
+        String tail = (firstSpace == -1) ? "" : cmd.substring(firstSpace);
+        cmd = head + tail;
+    }
     cmd.toLowerCase();
+    cmd.trim();
 
     // --- ОСНОВНЫЕ КОМАНДЫ ---
     if (cmd == "/autoon")
@@ -715,34 +725,42 @@ status += "   • Текущее время: " + timeStr + "\n\n";
         helpMsg += "/clearzones - удалить все зоны из расписания\n";
         sendMsg(helpMsg, cid);
     }
-else if (cmd == "/tgserver" || cmd == "/tgserver status") {
-    String mode = telegramEndpointManualMode ? "MANUAL" : "AUTO";
-    String endpoint = (activeTelegramEndpoint == TELEGRAM_ENDPOINT_API) ? "api.telegram.org" : "Cloudflare Worker";
-    sendMsg("🌐 Режим отправки: " + mode + "\nТекущий сервер: " + endpoint, cid);
-}
-else if (cmd == "/tgserver auto") {
-    telegramEndpointManualMode = false;
-    refreshTelegramEndpoint(true);
-    sendMsg("✅ Режим Telegram-сервера: AUTO", cid);
-}
-else if (cmd == "/tgserver api") {
-    TelegramEndpointMode previous = activeTelegramEndpoint;
-    telegramEndpointManualMode = true;
-    manualTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-    activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-    sendMsg("✅ Режим Telegram-сервера: MANUAL (api.telegram.org)", cid);
-    if (previous != activeTelegramEndpoint) {
-      notifyEndpointChange(previous, activeTelegramEndpoint, true);
+else if (cmd.startsWith("/tgserver")) {
+    String tgArgs = "";
+    if (cmd.length() > 9) {
+        tgArgs = cmd.substring(9);
+        tgArgs.trim();
+        while (tgArgs.indexOf("  ") != -1) tgArgs.replace("  ", " ");
     }
-}
-else if (cmd == "/tgserver cf") {
-    TelegramEndpointMode previous = activeTelegramEndpoint;
-    telegramEndpointManualMode = true;
-    manualTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
-    activeTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
-    sendMsg("✅ Режим Telegram-сервера: MANUAL (Cloudflare Worker)", cid);
-    if (previous != activeTelegramEndpoint) {
-      notifyEndpointChange(previous, activeTelegramEndpoint, true);
+
+    if (tgArgs.length() == 0 || tgArgs == "status") {
+        String mode = telegramEndpointManualMode ? "MANUAL" : "AUTO";
+        String endpoint = (activeTelegramEndpoint == TELEGRAM_ENDPOINT_API) ? "api.telegram.org" : "Cloudflare Worker";
+        sendMsg("🌐 Режим отправки: " + mode + "\nТекущий сервер: " + endpoint, cid);
+    } else if (tgArgs == "auto") {
+        telegramEndpointManualMode = false;
+        refreshTelegramEndpoint(true);
+        sendMsg("✅ Режим Telegram-сервера: AUTO", cid);
+    } else if (tgArgs == "api") {
+        TelegramEndpointMode previous = activeTelegramEndpoint;
+        telegramEndpointManualMode = true;
+        manualTelegramEndpoint = TELEGRAM_ENDPOINT_API;
+        activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
+        sendMsg("✅ Режим Telegram-сервера: MANUAL (api.telegram.org)", cid);
+        if (previous != activeTelegramEndpoint) {
+          notifyEndpointChange(previous, activeTelegramEndpoint, true);
+        }
+    } else if (tgArgs == "cf") {
+        TelegramEndpointMode previous = activeTelegramEndpoint;
+        telegramEndpointManualMode = true;
+        manualTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
+        activeTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
+        sendMsg("✅ Режим Telegram-сервера: MANUAL (Cloudflare Worker)", cid);
+        if (previous != activeTelegramEndpoint) {
+          notifyEndpointChange(previous, activeTelegramEndpoint, true);
+        }
+    } else {
+        sendMsg("Используйте: /tgserver auto|api|cf|status", cid);
     }
 }
 else if (cmd == "/forceon") {
