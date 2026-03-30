@@ -132,8 +132,8 @@ void sendViaTelegramApi(const String& text, const String& chatId) {
   bot.sendMessage(text, chatId);
 }
 
-void notifyEndpointChange(TelegramEndpointMode fromMode, TelegramEndpointMode toMode, bool manualSwitch) {
-  if (isEndpointNotifyInProgress || WiFi.status() != WL_CONNECTED) return;
+void notifyEndpointChange(TelegramEndpointMode fromMode, TelegramEndpointMode toMode, bool manualSwitch, const String& chatId) {
+  if (chatId.length() == 0 || isEndpointNotifyInProgress || WiFi.status() != WL_CONNECTED) return;
   isEndpointNotifyInProgress = true;
 
   String fromText = (fromMode == TELEGRAM_ENDPOINT_API) ? "api.telegram.org" : "Cloudflare Worker";
@@ -142,11 +142,11 @@ void notifyEndpointChange(TelegramEndpointMode fromMode, TelegramEndpointMode to
   String msg = "🔀 Сервер отправки переключен: " + fromText + " → " + toText + " (" + reason + ")";
 
   if (toMode == TELEGRAM_ENDPOINT_CF) {
-    if (!sendViaCloudflareWorker(msg, ADMIN_CHAT_ID)) {
-      sendViaTelegramApi(msg, ADMIN_CHAT_ID);
+    if (!sendViaCloudflareWorker(msg, chatId)) {
+      sendViaTelegramApi(msg, chatId);
     }
   } else {
-    sendViaTelegramApi(msg, ADMIN_CHAT_ID);
+    sendViaTelegramApi(msg, chatId);
   }
 
   isEndpointNotifyInProgress = false;
@@ -172,7 +172,6 @@ void refreshTelegramEndpoint(bool force = false) {
     Serial.println(activeTelegramEndpoint == TELEGRAM_ENDPOINT_API
       ? "✅ Telegram endpoint switched to api.telegram.org"
       : "✅ Telegram endpoint switched to Cloudflare Worker");
-    notifyEndpointChange(prevMode, activeTelegramEndpoint, false);
   }
 }
 
@@ -185,9 +184,7 @@ void sendMsg(String text, String chatId) {
         sendViaTelegramApi(text, chatId);
         return;
       }
-      TelegramEndpointMode prevMode = activeTelegramEndpoint;
       activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-      notifyEndpointChange(prevMode, activeTelegramEndpoint, false);
       sendViaTelegramApi(text, chatId);
     }
     return;
@@ -765,7 +762,7 @@ void setup()
             sendMsg("✅ Режим Telegram-сервера: MANUAL (api.telegram.org)", cid);
             if (previous != activeTelegramEndpoint)
             {
-                notifyEndpointChange(previous, activeTelegramEndpoint, true);
+                notifyEndpointChange(previous, activeTelegramEndpoint, true, cid);
             }
         }
         else if (tgArgs == "cf")
@@ -777,7 +774,7 @@ void setup()
             sendMsg("✅ Режим Telegram-сервера: MANUAL (Cloudflare Worker)", cid);
             if (previous != activeTelegramEndpoint)
             {
-                notifyEndpointChange(previous, activeTelegramEndpoint, true);
+                notifyEndpointChange(previous, activeTelegramEndpoint, true, cid);
             }
         }
         else
