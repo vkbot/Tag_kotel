@@ -475,6 +475,7 @@ void setup()
 
     // --- 3. Защита от дубликатов по message_id ---
     if (msg.messageID == lastMessageID) return;
+    lastMessageID = msg.messageID;
     lastUpdateID = msg.update_id;
     saveLastUpdateID();
 
