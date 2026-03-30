@@ -231,7 +231,6 @@ float calculateSmoothedTemperature() {
 
   return (sum - minV - maxV) / (count - 2);
 }
-
 void startAutoModeWorkDurationOverride() {
   if (!autoModeWorkDurationOverrideActive) {
     workDurationBeforeAutoOverride = workDurationMinutes;
