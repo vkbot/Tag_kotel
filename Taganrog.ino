@@ -53,6 +53,11 @@ uint8_t narodMonMeasurementCount = 0;
 unsigned long lastNarodMonMeasurementTime = 0;
 const unsigned long NARODMON_MEAS_INTERVAL = 100000; // 100 секунд
 
+enum TelegramEndpointMode : uint8_t {
+  TELEGRAM_ENDPOINT_API = 0,
+  TELEGRAM_ENDPOINT_CF = 1
+};
+
 void saveLastUpdateID() {
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.put(EEPROM_LAST_UPDATE_ID, lastUpdateID);
@@ -84,11 +89,6 @@ String urlencode(const String& str) {
   }
   return encoded;
 }
-
-enum TelegramEndpointMode : uint8_t {
-  TELEGRAM_ENDPOINT_API = 0,
-  TELEGRAM_ENDPOINT_CF = 1
-};
 
 TelegramEndpointMode activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
 TelegramEndpointMode manualTelegramEndpoint = TELEGRAM_ENDPOINT_API;
