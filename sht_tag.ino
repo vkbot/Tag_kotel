@@ -8,6 +8,7 @@
 #include <Ticker.h>
 #include <ArduinoJson.h>
 #include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoOTA.h>
 #include "boiler.h"
 
@@ -84,8 +85,115 @@ String urlencode(const String& str) {
   return encoded;
 }
 
-void sendMsg(String text, String chatId) {
+enum TelegramEndpointMode : uint8_t {
+  TELEGRAM_ENDPOINT_API = 0,
+  TELEGRAM_ENDPOINT_CF = 1
+};
+
+TelegramEndpointMode activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
+TelegramEndpointMode manualTelegramEndpoint = TELEGRAM_ENDPOINT_API;
+bool telegramEndpointManualMode = false;
+bool isEndpointNotifyInProgress = false;
+unsigned long lastTelegramEndpointCheck = 0;
+const unsigned long TELEGRAM_ENDPOINT_CHECK_INTERVAL_MS = 60000;
+
+bool isHttpsHostReachable(const char* host, uint16_t port = 443) {
+  WiFiClientSecure testClient;
+  testClient.setInsecure();
+  testClient.setTimeout(2500);
+  bool connected = testClient.connect(host, port);
+  testClient.stop();
+  return connected;
+}
+
+bool sendViaCloudflareWorker(const String& text, const String& chatId) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure();
+
+  HTTPClient http;
+  String url = "https://royal-river-71a9.dragonforceedge.workers.dev/bot" + String(BOT_TOKEN) +
+               "/sendMessage?chat_id=" + chatId +
+               "&text=" + urlencode(text);
+
+  http.setTimeout(5000);
+  if (!http.begin(secureClient, url)) {
+    return false;
+  }
+
+  int httpCode = http.GET();
+  bool success = (httpCode > 0 && httpCode < 400);
+  http.end();
+  return success;
+}
+
+void sendViaTelegramApi(const String& text, const String& chatId) {
   bot.sendMessage(urlencode(text), chatId);
+}
+
+void notifyEndpointChange(TelegramEndpointMode fromMode, TelegramEndpointMode toMode, bool manualSwitch) {
+  if (isEndpointNotifyInProgress || WiFi.status() != WL_CONNECTED) return;
+  isEndpointNotifyInProgress = true;
+
+  String fromText = (fromMode == TELEGRAM_ENDPOINT_API) ? "api.telegram.org" : "Cloudflare Worker";
+  String toText = (toMode == TELEGRAM_ENDPOINT_API) ? "api.telegram.org" : "Cloudflare Worker";
+  String reason = manualSwitch ? "ручной выбор" : "автоматическое переключение";
+  String msg = "🔀 Сервер отправки переключен: " + fromText + " → " + toText + " (" + reason + ")";
+
+  if (toMode == TELEGRAM_ENDPOINT_CF) {
+    if (!sendViaCloudflareWorker(msg, ADMIN_CHAT_ID)) {
+      sendViaTelegramApi(msg, ADMIN_CHAT_ID);
+    }
+  } else {
+    sendViaTelegramApi(msg, ADMIN_CHAT_ID);
+  }
+
+  isEndpointNotifyInProgress = false;
+}
+
+void refreshTelegramEndpoint(bool force = false) {
+  if (telegramEndpointManualMode) {
+    activeTelegramEndpoint = manualTelegramEndpoint;
+    return;
+  }
+
+  if (!force && (millis() - lastTelegramEndpointCheck < TELEGRAM_ENDPOINT_CHECK_INTERVAL_MS)) return;
+  lastTelegramEndpointCheck = millis();
+
+  TelegramEndpointMode prevMode = activeTelegramEndpoint;
+  bool apiOk = isHttpsHostReachable("api.telegram.org");
+  bool cfOk = isHttpsHostReachable("royal-river-71a9.dragonforceedge.workers.dev");
+
+  if (apiOk) activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
+  else if (cfOk) activeTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
+
+  if (prevMode != activeTelegramEndpoint) {
+    Serial.println(activeTelegramEndpoint == TELEGRAM_ENDPOINT_API
+      ? "✅ Telegram endpoint switched to api.telegram.org"
+      : "✅ Telegram endpoint switched to Cloudflare Worker");
+    notifyEndpointChange(prevMode, activeTelegramEndpoint, false);
+  }
+}
+
+void sendMsg(String text, String chatId) {
+  refreshTelegramEndpoint();
+
+  if (activeTelegramEndpoint == TELEGRAM_ENDPOINT_CF) {
+    if (!sendViaCloudflareWorker(text, chatId)) {
+      if (telegramEndpointManualMode) {
+        sendViaTelegramApi(text, chatId);
+        return;
+      }
+      TelegramEndpointMode prevMode = activeTelegramEndpoint;
+      activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
+      notifyEndpointChange(prevMode, activeTelegramEndpoint, false);
+      sendViaTelegramApi(text, chatId);
+    }
+    return;
+  }
+
+  sendViaTelegramApi(text, chatId);
 }
 // === Защита от дубликатов и спама ===
 long lastUserChatID = 0;
@@ -338,8 +446,10 @@ void setup()
     }
     else
     {
+        refreshTelegramEndpoint(true);
         delay(5000);
-        sendMsg("ok", "-1001819803857");
+        sendMsg("🤖 Устройство перезапущено", "-1001819803857");
+        sendMsg("🤖 Device has been restarted", "-1001819803857");
         narodmonTicker.attach(303, narodmonTick);
         // Синхронизация NTP
     timeClient.begin();
@@ -591,6 +701,7 @@ status += "   • Текущее время: " + timeStr + "\n\n";
         helpMsg += "/autooff — отключить автоотчёт\n";
         helpMsg += "/setinterval N — установить интервал автоотчёта (в секундах, минимум 30)\n";
         helpMsg += "/setwifi SSID PASSWORD — задать Wi-Fi\n";
+        helpMsg += "/tgserver auto|api|cf — выбор сервера отправки Telegram\n";
         helpMsg += "/reboot — перезагрузка устройства\n";
         helpMsg += "/help — показать эту справку\n\n";
         helpMsg += "🔥 Термостат:\n";
@@ -604,6 +715,36 @@ status += "   • Текущее время: " + timeStr + "\n\n";
         helpMsg += "/clearzones - удалить все зоны из расписания\n";
         sendMsg(helpMsg, cid);
     }
+else if (cmd == "/tgserver" || cmd == "/tgserver status") {
+    String mode = telegramEndpointManualMode ? "MANUAL" : "AUTO";
+    String endpoint = (activeTelegramEndpoint == TELEGRAM_ENDPOINT_API) ? "api.telegram.org" : "Cloudflare Worker";
+    sendMsg("🌐 Режим отправки: " + mode + "\nТекущий сервер: " + endpoint, cid);
+}
+else if (cmd == "/tgserver auto") {
+    telegramEndpointManualMode = false;
+    refreshTelegramEndpoint(true);
+    sendMsg("✅ Режим Telegram-сервера: AUTO", cid);
+}
+else if (cmd == "/tgserver api") {
+    TelegramEndpointMode previous = activeTelegramEndpoint;
+    telegramEndpointManualMode = true;
+    manualTelegramEndpoint = TELEGRAM_ENDPOINT_API;
+    activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
+    sendMsg("✅ Режим Telegram-сервера: MANUAL (api.telegram.org)", cid);
+    if (previous != activeTelegramEndpoint) {
+      notifyEndpointChange(previous, activeTelegramEndpoint, true);
+    }
+}
+else if (cmd == "/tgserver cf") {
+    TelegramEndpointMode previous = activeTelegramEndpoint;
+    telegramEndpointManualMode = true;
+    manualTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
+    activeTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
+    sendMsg("✅ Режим Telegram-сервера: MANUAL (Cloudflare Worker)", cid);
+    if (previous != activeTelegramEndpoint) {
+      notifyEndpointChange(previous, activeTelegramEndpoint, true);
+    }
+}
 else if (cmd == "/forceon") {
     bool success = sendRelayCommand(true);
     if (success) {
