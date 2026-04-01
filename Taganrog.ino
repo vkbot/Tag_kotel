@@ -8,7 +8,6 @@
 #include <Ticker.h>
 #include <ArduinoJson.h>
 #include <ESP8266HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <ArduinoOTA.h>
 #include "boiler.h"
 
@@ -53,11 +52,6 @@ uint8_t narodMonMeasurementCount = 0;
 unsigned long lastNarodMonMeasurementTime = 0;
 const unsigned long NARODMON_MEAS_INTERVAL = 100000; // 100 секунд
 
-enum TelegramEndpointMode : uint8_t {
-  TELEGRAM_ENDPOINT_API = 0,
-  TELEGRAM_ENDPOINT_CF = 1
-};
-
 void saveLastUpdateID() {
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.put(EEPROM_LAST_UPDATE_ID, lastUpdateID);
@@ -90,115 +84,8 @@ String urlencode(const String& str) {
   return encoded;
 }
 
-TelegramEndpointMode activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-TelegramEndpointMode manualTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-bool telegramEndpointManualMode = false;
-bool isEndpointNotifyInProgress = false;
-unsigned long lastTelegramEndpointCheck = 0;
-const unsigned long TELEGRAM_ENDPOINT_CHECK_INTERVAL_MS = 60000;
-const bool FASTBOT_UPDATES_VIA_CF_SUPPORTED = false;
-
-String getTelegramUpdatesRouteInfo() {
-  if (FASTBOT_UPDATES_VIA_CF_SUPPORTED) {
-    return "📥 getUpdates: через выбранный Telegram endpoint";
-  }
-  return "📥 getUpdates: через api.telegram.org (ограничение FastBot)";
-}
-
-bool isHttpsHostReachable(const char* host, uint16_t port = 443) {
-  WiFiClientSecure testClient;
-  testClient.setInsecure();
-  testClient.setTimeout(2500);
-  bool connected = testClient.connect(host, port);
-  testClient.stop();
-  return connected;
-}
-
-bool sendViaCloudflareWorker(const String& text, const String& chatId) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  WiFiClientSecure secureClient;
-  secureClient.setInsecure();
-
-  HTTPClient http;
-  String url = "https://royal-river-71a9.dragonforceedge.workers.dev/bot" + String(BOT_TOKEN) +
-               "/sendMessage?chat_id=" + chatId +
-               "&text=" + urlencode(text);
-
-  http.setTimeout(5000);
-  if (!http.begin(secureClient, url)) {
-    return false;
-  }
-
-  int httpCode = http.GET();
-  bool success = (httpCode > 0 && httpCode < 400);
-  http.end();
-  return success;
-}
-
-void sendViaTelegramApi(const String& text, const String& chatId) {
-  bot.sendMessage(text, chatId);
-}
-
-void notifyEndpointChange(TelegramEndpointMode fromMode, TelegramEndpointMode toMode, bool manualSwitch, const String& chatId) {
-  if (chatId.length() == 0 || isEndpointNotifyInProgress || WiFi.status() != WL_CONNECTED) return;
-  isEndpointNotifyInProgress = true;
-
-  String fromText = (fromMode == TELEGRAM_ENDPOINT_API) ? "api.telegram.org" : "Cloudflare Worker";
-  String toText = (toMode == TELEGRAM_ENDPOINT_API) ? "api.telegram.org" : "Cloudflare Worker";
-  String reason = manualSwitch ? "ручной выбор" : "автоматическое переключение";
-  String msg = "🔀 Сервер отправки переключен: " + fromText + " → " + toText + " (" + reason + ")";
-
-  if (toMode == TELEGRAM_ENDPOINT_CF) {
-    if (!sendViaCloudflareWorker(msg, chatId)) {
-      sendViaTelegramApi(msg, chatId);
-    }
-  } else {
-    sendViaTelegramApi(msg, chatId);
-  }
-
-  isEndpointNotifyInProgress = false;
-}
-
-void refreshTelegramEndpoint(bool force = false) {
-  if (telegramEndpointManualMode) {
-    activeTelegramEndpoint = manualTelegramEndpoint;
-    return;
-  }
-
-  if (!force && (millis() - lastTelegramEndpointCheck < TELEGRAM_ENDPOINT_CHECK_INTERVAL_MS)) return;
-  lastTelegramEndpointCheck = millis();
-
-  TelegramEndpointMode prevMode = activeTelegramEndpoint;
-  bool apiOk = isHttpsHostReachable("api.telegram.org");
-  bool cfOk = isHttpsHostReachable("royal-river-71a9.dragonforceedge.workers.dev");
-
-  if (apiOk) activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-  else if (cfOk) activeTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
-
-  if (prevMode != activeTelegramEndpoint) {
-    Serial.println(activeTelegramEndpoint == TELEGRAM_ENDPOINT_API
-      ? "✅ Telegram endpoint switched to api.telegram.org"
-      : "✅ Telegram endpoint switched to Cloudflare Worker");
-  }
-}
-
 void sendMsg(String text, String chatId) {
-  refreshTelegramEndpoint();
-
-  if (activeTelegramEndpoint == TELEGRAM_ENDPOINT_CF) {
-    if (!sendViaCloudflareWorker(text, chatId)) {
-      if (telegramEndpointManualMode) {
-        sendViaTelegramApi(text, chatId);
-        return;
-      }
-      activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-      sendViaTelegramApi(text, chatId);
-    }
-    return;
-  }
-
-  sendViaTelegramApi(text, chatId);
+  bot.sendMessage(urlencode(text), chatId);
 }
 // === Защита от дубликатов и спама ===
 long lastUserChatID = 0;
@@ -451,10 +338,8 @@ void setup()
     }
     else
     {
-        refreshTelegramEndpoint(true);
         delay(5000);
-        sendMsg("🤖 Устройство перезапущено", "-1001819803857");
-        sendMsg("🤖 Device has been restarted", "-1001819803857");
+        sendMsg("ok", "-1001819803857");
         narodmonTicker.attach(303, narodmonTick);
         // Синхронизация NTP
     timeClient.begin();
@@ -472,16 +357,14 @@ void setup()
         autoReportTicker.attach(reportInterval, autoReportTick);
     }
     bot.attach([](FB_msg& msg)
-    {
+{
     // --- 2. Коулдаун: не реагируем чаще, чем раз в 2 секунды на одного пользователя ---
-    if (msg.chatID.toInt() == lastUserChatID && millis() - lastUserCommandTime < COMMAND_COOLDOWN_MS)
-    {
+   if (msg.chatID.toInt() == lastUserChatID && millis() - lastUserCommandTime < COMMAND_COOLDOWN_MS) {
         return;
     }
 
     // --- 3. Защита от дубликатов по message_id ---
     if (msg.messageID == lastMessageID) return;
-    lastMessageID = msg.messageID;
     lastUpdateID = msg.update_id;
     saveLastUpdateID();
 
@@ -492,26 +375,13 @@ void setup()
     // --- 5. Ждём 5 сек после старта ---
     if (millis() - startupTime < startupDelay) return;
 
-    // --- 6. Слушаем команды только в личке с ботом ---
-    if (msg.chatID.startsWith("-")) return;
+    // --- 6. Игнорируем группы (если нужно) ---
+    if (msg.chatID == "-1001819803857") return;
 
     String cid = msg.chatID;
     String rawText = msg.text;
-    rawText.trim();
-
-    int firstSpace = rawText.indexOf(' ');
-    int mentionPos = rawText.indexOf('@');
-    if (mentionPos != -1 && (firstSpace == -1 || mentionPos < firstSpace))
-    {
-        String head = rawText.substring(0, mentionPos);
-        String tail = (firstSpace == -1) ? "" : rawText.substring(firstSpace);
-        rawText = head + tail;
-        rawText.trim();
-    }
-
     String cmd = rawText;
     cmd.toLowerCase();
-    cmd.trim();
 
     // --- ОСНОВНЫЕ КОМАНДЫ ---
     if (cmd == "/autoon")
@@ -587,135 +457,131 @@ void setup()
         }
     }
     else if (cmd == "/status")
+{
+    // --- Аптайм ---
+    unsigned long uptimeMillis = millis();
+    unsigned long seconds = uptimeMillis / 1000;
+    unsigned long minutes = seconds / 60;
+    unsigned long hours = minutes / 60;
+    unsigned long days = hours / 24;
+    seconds %= 60;
+    minutes %= 60;
+    hours %= 24;
+    String uptimeMsg = "⏱ Аптайм: ";
+    if (days > 0) uptimeMsg += String(days) + " д ";
+    if (hours > 0 || days > 0) uptimeMsg += String(hours) + " ч ";
+    if (minutes > 0 || hours > 0 || days > 0) uptimeMsg += String(minutes) + " м ";
+    uptimeMsg += String(seconds) + " с";
+
+    // --- Датчик ---
+    float t = sht31.readTemperature();
+    float h = sht31.readHumidity();
+    if (isnan(t) || isnan(h))
     {
-        // --- Аптайм ---
-        unsigned long uptimeMillis = millis();
-        unsigned long seconds = uptimeMillis / 1000;
-        unsigned long minutes = seconds / 60;
-        unsigned long hours = minutes / 60;
-        unsigned long days = hours / 24;
-        seconds %= 60;
-        minutes %= 60;
-        hours %= 24;
-        String uptimeMsg = "⏱ Аптайм: ";
-        if (days > 0) uptimeMsg += String(days) + " д ";
-        if (hours > 0 || days > 0) uptimeMsg += String(hours) + " ч ";
-        if (minutes > 0 || hours > 0 || days > 0) uptimeMsg += String(minutes) + " м ";
-        uptimeMsg += String(seconds) + " с";
-
-        // --- Датчик ---
-        float t = sht31.readTemperature();
-        float h = sht31.readHumidity();
-        if (isnan(t) || isnan(h))
-        {
-            reportError("Ошибка чтения SHT31 при /status.");
-            sendMsg("❌ Ошибка датчика", cid);
-            return;
-        }
-
-        // --- Базовый статус (всегда) ---
-        String status = "📟 **ПОЛНЫЙ СТАТУС** 📟\n\n";
-        status += "🌡 Температура: " + String(t, 2) + " °C\n";
-        status += "💧 Влажность: " + String(h, 2) + " %\n";
-        status += "🌐 IP: " + WiFi.localIP().toString() + "\n";
-        status += uptimeMsg + "\n";
-
-        // Обновляем время (даже если не синхронизировано)
-        timeClient.update();
-        int ho = timeClient.getHours();
-        int m = timeClient.getMinutes();
-
-        // Проверяем, валидное ли время (если не синхронизировано — будет 0:00 или мусор)
-        String timeStr = (ho >= 0 && ho <= 23 && m >= 0 && m <= 59)
-            ? String(ho) + ":" + (m < 10 ? "0" : "") + String(m)
-            : "не синхронизировано";
-
-        status += "   • Текущее время: " + timeStr + "\n\n";
-
-        // --- Статус термостата (всегда) ---
-        if (thermostatEnabled)
-        {
-            status += "🔥 Термостат: **включён**\n";
-        }
-        else
-        {
-            status += "❄️ Термостат: **выключен**\n";
-        }
-        status += "   • Режим: " + String(workModeEnabled ? "РАБОТА" : "АВТО") + "\n";
-
-        // --- Вся "хуйня" про котёл — ТОЛЬКО если термостат включён ---
-        if (thermostatEnabled)
-        {
-            float currentTarget = getCurrentTargetTemp();
-            status += "   • Цель: **" + String(currentTarget, 1) + " °C**\n";
-
-            // Время последнего включения
-            String lastOnStr = "никогда";
-            if (lastRelayOnTime > 0)
-            {
-                unsigned long elapsed = millis() - lastRelayOnTime;
-                unsigned long secs = elapsed / 1000;
-                unsigned long mins = secs / 60;
-                unsigned long hrs = mins / 60;
-                secs %= 60;
-                mins %= 60;
-                if (hrs > 0) lastOnStr = String(hrs) + " ч " + String(mins) + " м назад";
-                else if (mins > 0) lastOnStr = String(mins) + " м " + String(secs) + " с назад";
-                else lastOnStr = String(secs) + " с назад";
-            }
-
-            // Время последнего выключения
-            String lastOffStr = "никогда";
-            if (lastRelayTurnOffTime > 0)
-            {
-                unsigned long elapsed = millis() - lastRelayTurnOffTime;
-                unsigned long secs = elapsed / 1000;
-                unsigned long mins = secs / 60;
-                unsigned long hrs = mins / 60;
-                secs %= 60;
-                mins %= 60;
-                if (hrs > 0) lastOffStr = String(hrs) + " ч " + String(mins) + " м назад";
-                else if (mins > 0) lastOffStr = String(mins) + " м " + String(secs) + " с назад";
-                else lastOffStr = String(secs) + " с назад";
-            }
-            
-            status += "   • Последнее включение: **" + lastOnStr + "**\n";
-            status += "   • Последнее выключение: **" + lastOffStr + "**\n";
-
-            // Реле
-            status += "   • Реле: " + String(relayState ? "включено" : "выключено") + "\n";
-
-            // Гистерезис
-            status += "   • Гистерезис: " + String(hysteresis, 1) + " °C\n";
-
-            // Макс. время работы
-            status += "   • Макс. работа: " + String(workDurationMinutes) + " мин\n";
-            
-            // Мин. пауза между включениями 
-            status += "   • Мин. пауза: " + String(minStartInterval / 60000UL) + " мин\n";
-            
-            // Зоны
-            status += "   • Зон в расписании: " + String(zoneCount) + "\n";
-        }
-
-        sendMsg(status, cid);
+        reportError("Ошибка чтения SHT31 при /status.");
+        sendMsg("❌ Ошибка датчика", cid);
+        return;
     }
-    else if (cmd == "/reboot")
+
+    // --- Базовый статус (всегда) ---
+    String status = "📟 **ПОЛНЫЙ СТАТУС** 📟\n\n";
+    status += "🌡 Температура: " + String(t, 2) + " °C\n";
+    status += "💧 Влажность: " + String(h, 2) + " %\n";
+    status += "🌐 IP: " + WiFi.localIP().toString() + "\n";
+    status += uptimeMsg + "\n";
+    // Обновляем время (даже если не синхронизировано)
+timeClient.update();
+int ho = timeClient.getHours();
+int m = timeClient.getMinutes();
+
+// Проверяем, валидное ли время (если не синхронизировано — будет 0:00 или мусор)
+String timeStr = (ho >= 0 && ho <= 23 && m >= 0 && m <= 59)
+    ? String(ho) + ":" + (m < 10 ? "0" : "") + String(m)
+    : "не синхронизировано";
+
+status += "   • Текущее время: " + timeStr + "\n\n";
+
+    // --- Статус термостата (всегда) ---
+    if (thermostatEnabled)
     {
-        if (millis() - startupTime < 30000)
-        {
-            sendMsg("⏱ Ещё рано, подождите немного...", cid);
-            return;
-        }
-
-        sendMsg("🔄 Перезагрузка через 3 секунды...", cid);
-        delay(500);             // дать телеге успеть отправить
-        bot.tick();             // принудительно обработать очередь FastBot
-
-        WiFi.disconnect(true);  // полностью отключаем Wi-Fi
-        delay(100);             // ждём немного
-        ESP.restart();          // перезапуск без подвисания
+        status += "🔥 Термостат: **включён**\n";
     }
+    else
+    {
+        status += "❄️ Термостат: **выключен**\n";
+    }
+  status += "   • Режим: " + String(workModeEnabled ? "РАБОТА" : "АВТО") + "\n";
+    // --- Вся "хуйня" про котёл — ТОЛЬКО если термостат включён ---
+    if (thermostatEnabled)
+    {
+        float currentTarget = getCurrentTargetTemp();
+        status += "   • Цель: **" + String(currentTarget, 1) + " °C**\n";
+
+        // Время последнего включения
+        String lastOnStr = "никогда";
+        if (lastRelayOnTime > 0)
+        {
+            unsigned long elapsed = millis() - lastRelayOnTime;
+            unsigned long secs = elapsed / 1000;
+            unsigned long mins = secs / 60;
+            unsigned long hrs = mins / 60;
+            secs %= 60;
+            mins %= 60;
+            if (hrs > 0) lastOnStr = String(hrs) + " ч " + String(mins) + " м назад";
+            else if (mins > 0) lastOnStr = String(mins) + " м " + String(secs) + " с назад";
+            else lastOnStr = String(secs) + " с назад";
+        }
+        // Время последнего выключения
+        String lastOffStr = "никогда";
+        if (lastRelayTurnOffTime > 0)
+        {
+            unsigned long elapsed = millis() - lastRelayTurnOffTime;
+            unsigned long secs = elapsed / 1000;
+            unsigned long mins = secs / 60;
+            unsigned long hrs = mins / 60;
+            secs %= 60;
+            mins %= 60;
+            if (hrs > 0) lastOffStr = String(hrs) + " ч " + String(mins) + " м назад";
+            else if (mins > 0) lastOffStr = String(mins) + " м " + String(secs) + " с назад";
+            else lastOffStr = String(secs) + " с назад";
+        }
+        
+        status += "   • Последнее включение: **" + lastOnStr + "**\n";
+        status += "   • Последнее выключение: **" + lastOffStr + "**\n";
+
+        // Реле
+        status += "   • Реле: " + String(relayState ? "включено" : "выключено") + "\n";
+
+        // Гистерезис
+        status += "   • Гистерезис: " + String(hysteresis, 1) + " °C\n";
+
+        // Макс. время работы
+        status += "   • Макс. работа: " + String(workDurationMinutes) + " мин\n";
+        
+        // Мин. пауза между включениями 
+        status += "   • Мин. пауза: " + String(minStartInterval / 60000UL) + " мин\n";
+        
+        // Зоны
+        status += "   • Зон в расписании: " + String(zoneCount) + "\n";
+    }
+
+    sendMsg(status, cid);
+}
+  else if (cmd == "/reboot")
+{
+    if (millis() - startupTime < 30000) {
+        sendMsg("⏱ Ещё рано, подождите немного...", cid);
+        return;
+    }
+
+    sendMsg("🔄 Перезагрузка через 3 секунды...", cid);
+    delay(500);             // дать телеге успеть отправить
+    bot.tick();             // принудительно обработать очередь FastBot
+
+    WiFi.disconnect(true);  // полностью отключаем Wi-Fi
+    delay(100);             // ждём немного
+    ESP.restart();          // перезапуск без подвисания
+}
 
     else if (cmd == "/help")
     {
@@ -725,7 +591,6 @@ void setup()
         helpMsg += "/autooff — отключить автоотчёт\n";
         helpMsg += "/setinterval N — установить интервал автоотчёта (в секундах, минимум 30)\n";
         helpMsg += "/setwifi SSID PASSWORD — задать Wi-Fi\n";
-        helpMsg += "/tgserver auto|api|cf — выбор сервера отправки Telegram\n";
         helpMsg += "/reboot — перезагрузка устройства\n";
         helpMsg += "/help — показать эту справку\n\n";
         helpMsg += "🔥 Термостат:\n";
@@ -739,84 +604,25 @@ void setup()
         helpMsg += "/clearzones - удалить все зоны из расписания\n";
         sendMsg(helpMsg, cid);
     }
-    else if (cmd.startsWith("/tgserver"))
-    {
-        String tgArgs = "";
-        if (cmd.length() > 9)
-        {
-            tgArgs = cmd.substring(9);
-            tgArgs.trim();
-            while (tgArgs.indexOf("  ") != -1) tgArgs.replace("  ", " ");
-        }
+else if (cmd == "/forceon") {
+    bool success = sendRelayCommand(true);
+    if (success) {
+        relayState = true;
+        sendMsg("✅ ФОРСИРОВАННОЕ ВКЛЮЧЕНИЕ: команда успешно отправлена", cid);
+    } else {
+        sendMsg("❌ Реле не отвечает (force ON)", cid);
+    }
+}
 
-        if (tgArgs.length() == 0 || tgArgs == "status")
-        {
-            String mode = telegramEndpointManualMode ? "MANUAL" : "AUTO";
-            String endpoint = (activeTelegramEndpoint == TELEGRAM_ENDPOINT_API) ? "api.telegram.org" : "Cloudflare Worker";
-            sendMsg("🌐 Режим отправки: " + mode + "\nТекущий сервер: " + endpoint + "\n" + getTelegramUpdatesRouteInfo(), cid);
-        }
-        else if (tgArgs == "auto")
-        {
-            telegramEndpointManualMode = false;
-            refreshTelegramEndpoint(true);
-            sendMsg("✅ Режим Telegram-сервера: AUTO", cid);
-        }
-        else if (tgArgs == "api")
-        {
-            TelegramEndpointMode previous = activeTelegramEndpoint;
-            telegramEndpointManualMode = true;
-            manualTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-            activeTelegramEndpoint = TELEGRAM_ENDPOINT_API;
-            sendMsg("✅ Режим Telegram-сервера: MANUAL (api.telegram.org)", cid);
-            if (previous != activeTelegramEndpoint)
-            {
-                notifyEndpointChange(previous, activeTelegramEndpoint, true, cid);
-            }
-        }
-        else if (tgArgs == "cf")
-        {
-            TelegramEndpointMode previous = activeTelegramEndpoint;
-            telegramEndpointManualMode = true;
-            manualTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
-            activeTelegramEndpoint = TELEGRAM_ENDPOINT_CF;
-            sendMsg("✅ Режим Telegram-сервера: MANUAL (Cloudflare Worker)\n" + getTelegramUpdatesRouteInfo(), cid);
-            if (previous != activeTelegramEndpoint)
-            {
-                notifyEndpointChange(previous, activeTelegramEndpoint, true, cid);
-            }
-        }
-        else
-        {
-            sendMsg("Используйте: /tgserver auto|api|cf|status", cid);
-        }
+else if (cmd == "/forceoff") {
+    bool success = sendRelayCommand(false);
+    if (success) {
+        relayState = false;
+        sendMsg("✅ ФОРСИРОВАННОЕ ВЫКЛЮЧЕНИЕ: команда успешно отправлена", cid);
+    } else {
+        sendMsg("❌ Реле не отвечает (force OFF)", cid);
     }
-    else if (cmd == "/forceon")
-    {
-        bool success = sendRelayCommand(true);
-        if (success)
-        {
-            relayState = true;
-            sendMsg("✅ ФОРСИРОВАННОЕ ВКЛЮЧЕНИЕ: команда успешно отправлена", cid);
-        }
-        else
-        {
-            sendMsg("❌ Реле не отвечает (force ON)", cid);
-        }
-    }
-    
-    else if (cmd == "/forceoff")
-    {
-        bool success = sendRelayCommand(false);
-        if (success)
-        {
-            relayState = false;
-            sendMsg("✅ ФОРСИРОВАННОЕ ВЫКЛЮЧЕНИЕ: команда успешно отправлена", cid);
-        }
-        else
-        {
-            sendMsg("❌ Реле не отвечает (force OFF)", cid);
-        }
-    }
+}
 
     // === Команды термостата (из boiler.h) ===
     else if (cmd == "/thermo on")
@@ -1016,8 +822,7 @@ else if (cmd.startsWith("/work ")) {
 
 else if (cmd == "/auto") {
     workModeEnabled = false;
-    startAutoModeWorkDurationOverride();
-    sendMsg("✅ Режим: АВТО (по расписанию). Лимит работы: 14 мин на 1 час", cid);
+    sendMsg("✅ Режим: АВТО (по расписанию)", cid);
 }
     else
     {

@@ -4,18 +4,12 @@
 #include <ESP8266HTTPClient.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
-#include <math.h>
 // === Защита от сквозняка ===
 #define TEMP_HISTORY_SIZE 4
 float tempHistory[TEMP_HISTORY_SIZE] = { NAN, NAN, NAN, NAN };
 uint8_t tempHistoryIndex = 0;
 unsigned long lastTempReadTime = 0;
 float lastAvgTemp = NAN; // актуальное среднее
-const float TEMP_VALID_MIN = -35.0;
-const float TEMP_VALID_MAX = 85.0;
-const float TEMP_MAX_STEP = 3.0; // защита от резких выбросов за 30 секунд
-const uint8_t TEMP_SPIKE_REJECT_LIMIT = 3; // после серии отклонений принимаем новое базовое значение
-uint8_t tempSpikeRejectCount = 0;
 // === ВНЕШНИЕ ЗАВИСИМОСТИ (из sht_tag.ino) ===
 extern void serialToTelegram(const String &message);
 extern void reportError(const String &message);
@@ -66,12 +60,6 @@ unsigned long lastRelayOnTime = 0;        // ← НОВОЕ: время посл
 bool relayIsRunning = false;              // флаг: реле активно (включено и работает)
 uint16_t workDurationMinutes = 4;         // макс. время работы (настраивается)
 uint32_t minStartInterval = 10 * 60 * 1000UL;
-
-const uint16_t AUTO_MODE_WORK_DURATION_MINUTES = 14;
-const unsigned long AUTO_MODE_WORK_DURATION_PERIOD = 60UL * 60UL * 1000UL; // 1 час
-bool autoModeWorkDurationOverrideActive = false;
-unsigned long autoModeWorkDurationOverrideStart = 0;
-uint16_t workDurationBeforeAutoOverride = 4;
 TimeSlot timeZones[MAX_ZONES];
 uint8_t zoneCount = 0;
 bool zonesChanged = false;
@@ -198,62 +186,6 @@ bool sendRelayCommand(bool on) {
   }
 }
 
-bool isValidTemperature(float t) {
-  return !isnan(t) && t >= TEMP_VALID_MIN && t <= TEMP_VALID_MAX;
-}
-
-float calculateSmoothedTemperature() {
-  float values[TEMP_HISTORY_SIZE];
-  uint8_t count = 0;
-
-  for (uint8_t i = 0; i < TEMP_HISTORY_SIZE; i++) {
-    if (isValidTemperature(tempHistory[i])) {
-      values[count++] = tempHistory[i];
-    }
-  }
-
-  if (count == 0) return NAN;
-
-  if (count < 3) {
-    float sum = 0.0;
-    for (uint8_t i = 0; i < count; i++) sum += values[i];
-    return sum / count;
-  }
-
-  float minV = values[0];
-  float maxV = values[0];
-  float sum = values[0];
-  for (uint8_t i = 1; i < count; i++) {
-    sum += values[i];
-    if (values[i] < minV) minV = values[i];
-    if (values[i] > maxV) maxV = values[i];
-  }
-
-  return (sum - minV - maxV) / (count - 2);
-}
-void startAutoModeWorkDurationOverride() {
-  if (!autoModeWorkDurationOverrideActive) {
-    workDurationBeforeAutoOverride = workDurationMinutes;
-    workDurationMinutes = AUTO_MODE_WORK_DURATION_MINUTES;
-    autoModeWorkDurationOverrideActive = true;
-  }
-
-  autoModeWorkDurationOverrideStart = millis();
-}
-
-void updateAutoModeWorkDurationOverride() {
-  if (!autoModeWorkDurationOverrideActive) return;
-
-  if (millis() - autoModeWorkDurationOverrideStart >= AUTO_MODE_WORK_DURATION_PERIOD) {
-    workDurationMinutes = workDurationBeforeAutoOverride;
-    autoModeWorkDurationOverrideActive = false;
-    sendMsg(
-      "⏱ Временный лимит 14 мин завершён. Возвращено значение: " + String(workDurationMinutes) + " мин",
-      String(lastUserChatID)
-    );
-  }
-}
-
 void updateRelay() {
   // Если термостат выключен — выключаем реле
   if (!thermostatEnabled) {
@@ -271,9 +203,9 @@ void updateRelay() {
 
  // Для выключения — мгновенная температура
 float instantTemp = sht31.readTemperature();
-if (!isValidTemperature(instantTemp)) return;
+if (isnan(instantTemp)) return;
 
-// Для включения — сглаженная температура
+// Для включения — средняя температура за 2 мин
 float t = lastAvgTemp;
 if (isnan(t)) t = instantTemp; // fallback при отсутствии истории
 
@@ -341,37 +273,25 @@ void updateAverageTemperature() {
   if (now - lastTempReadTime < 30000UL) return; // каждые 30 сек
 
   float t = sht31.readTemperature();
-  if (!isValidTemperature(t)) return;
+  if (!isnan(t)) {
+    tempHistory[tempHistoryIndex] = t;
+    tempHistoryIndex = (tempHistoryIndex + 1) % TEMP_HISTORY_SIZE;
+    lastTempReadTime = now;
 
-  if (isValidTemperature(lastAvgTemp) && fabs(t - lastAvgTemp) > TEMP_MAX_STEP) {
-    tempSpikeRejectCount++;
-    lastTempReadTime = now; // даже при отклонении двигаем окно проверки, чтобы фильтр мог восстановиться
-
-    if (tempSpikeRejectCount < TEMP_SPIKE_REJECT_LIMIT) {
-      return; // отбрасываем резкий выброс
+    // Считаем среднее (игнорируем NAN)
+    float sum = 0.0;
+    uint8_t count = 0;
+    for (int i = 0; i < TEMP_HISTORY_SIZE; i++) {
+      if (!isnan(tempHistory[i])) {
+        sum += tempHistory[i];
+        count++;
+      }
     }
-
-    // Считаем, что это смена реального режима/уровня: сбрасываем историю и принимаем новое значение
-    for (uint8_t i = 0; i < TEMP_HISTORY_SIZE; i++) {
-      tempHistory[i] = NAN;
-    }
-    tempHistoryIndex = 0;
-  } else {
-    tempSpikeRejectCount = 0;
-  }
-
-  tempHistory[tempHistoryIndex] = t;
-  tempHistoryIndex = (tempHistoryIndex + 1) % TEMP_HISTORY_SIZE;
-  lastTempReadTime = now;
-
-  float smoothed = calculateSmoothedTemperature();
-  if (isValidTemperature(smoothed)) {
-    lastAvgTemp = smoothed;
+    lastAvgTemp = (count > 0) ? sum / count : t;
   }
 }
 void boilerLoop() {
   updateAverageTemperature(); // <-- добавлено
-  updateAutoModeWorkDurationOverride();
   static unsigned long lastUpdate = 0;
   static unsigned long lastSave = 0;
 
@@ -402,8 +322,7 @@ void boilerLoop() {
     if (intervalOver) {
         workModeEnabled = false;   // выключаем режим работы
         workScheduled = false;     // интервал завершён
-        startAutoModeWorkDurationOverride();
-        sendMsg("✅ Временной интервал работы окончен. Переключаемся в АВТО: 14 мин на 1 час", String(lastUserChatID));
+        sendMsg("✅ Временной интервал работы окончен. Переключаемся в АВТО", String(lastUserChatID));
     }
 }
 
