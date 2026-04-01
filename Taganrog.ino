@@ -9,12 +9,12 @@
 #include <ArduinoJson.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoOTA.h>
-#include "boiler.h"
 
 #define EEPROM_SIZE 512
 #define BOT_TOKEN "8079276277:AAHrqQKTo3vp76bcX2ekPw59dwWxRvTaEHg"
 #define ADMIN_CHAT_ID "-4647981556"
 #define HELLO_CHAT_ID "-1001819803857"
+#include "boiler.h"
 // --- Для поиска boiler.local ---
 unsigned long lastRelayErrorTime = 0; // ← НОВАЯ ПЕРЕМЕННАЯ: время последней ошибки реле
 const unsigned long RELAY_ERROR_COOLDOWN = 5 * 60 * 1000; // 5 минут в мс
