@@ -9,6 +9,7 @@
 #include <ArduinoJson.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoOTA.h>
+#include "fastbott.h"
 
 #define EEPROM_SIZE 512
 #define BOT_TOKEN "8079276277:AAHrqQKTo3vp76bcX2ekPw59dwWxRvTaEHg"
@@ -24,6 +25,7 @@ const unsigned long RELAY_MSG_INTERVAL = 60000; // интервал между �
 ESP8266WiFiMulti WiFiMulti;
 WiFiClient client;
 FastBot bot(BOT_TOKEN);
+FastBott fastBott;
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 Ticker autoReportTicker;
 Ticker narodmonTicker;
@@ -40,8 +42,6 @@ uint32_t reportInterval = 600;
 bool useFastBottForTelegram = false;
 const char* TELEGRAM_API_HOST = "api.telegram.org";
 
-// Выносим TLS-клиент из стека (на ESP8266 это снижает риск ребута при HTTPS в обработчике команд)
-static WiFiClientSecure tgSecureClient;
 volatile bool needToSendAutoReport = false;
 bool sendtonm = false;
 unsigned long startupTime = 0;
@@ -92,24 +92,6 @@ void loadLastUserChatID() {
     lastUserChatID = tmp;
     EEPROM.end();
 }
-String urlencode(const String& str) {
-  String encoded = "";
-  const char *cstr = str.c_str();
-
-  for (size_t i = 0; i < strlen(cstr); i++) {
-    unsigned char c = cstr[i];
-    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-        c == '-' || c == '_' || c == '.' || c == '~') {
-      encoded += (char)c;
-    } else {
-      char buf[4];
-      sprintf(buf, "%%%02X", c);
-      encoded += buf;
-    }
-  }
-  return encoded;
-}
-
 bool sendViaTelegramFastBot(const String& text, const String& chatId) {
   String out = text;
   out.replace("\r", "");
@@ -119,17 +101,7 @@ bool sendViaTelegramFastBot(const String& text, const String& chatId) {
 }
 
 bool sendViaTelegramFastBott(const String& text, const String& chatId) {
-  tgSecureClient.setInsecure();
-  HTTPClient http;
-  String encodedText = urlencode(text);
-  String encodedChatId = urlencode(chatId);
-  String url = "https://" + String(TELEGRAM_API_HOST) + "/bot" + String(BOT_TOKEN) +
-               "/sendMessage?chat_id=" + encodedChatId + "&text=" + encodedText;
-  http.setTimeout(10000);
-  if (!http.begin(tgSecureClient, url)) return false;
-  int code = http.GET();
-  http.end();
-  return code == HTTP_CODE_OK;
+  return fastBott.sendMessage(String(BOT_TOKEN), chatId, text, 10000);
 }
 
 bool sendMsg(String text, String chatId) {
