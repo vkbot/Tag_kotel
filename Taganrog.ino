@@ -123,6 +123,7 @@ bool sendViaTelegramFastBot(const String& text, const String& chatId) {
 }
 
 bool sendViaCloudflareWorker(const String& text, const String& chatId) {
+
   if (text.length() > MAX_CF_TEXT_LEN) return false;
   tgSecureClient.setInsecure();
   HTTPClient http;
