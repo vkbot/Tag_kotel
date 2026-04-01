@@ -46,11 +46,14 @@ unsigned long startupTime = 0;
 const unsigned long startupDelay = 5000;
 long lastMessageID = 0;
 long lastUpdateID = 0;
+long lastUserChatID = 0;
+unsigned long lastUserCommandTime = 0;
 float Temperature; 
 float Temperatur;       
 // Адрес в EEPROM для хранения lastMessageID (в пределах EEPROM_SIZE)
 #define EEPROM_LAST_UPDATE_ID 100  // адрес в EEPROM (например 100–103)
 #define EEPROM_TG_SEND_MODE 104
+#define EEPROM_LAST_USER_CHAT_ID 108
 
 unsigned long wifiLostAt = 0;
 String wifiLostClock = "--:--:--";
@@ -70,6 +73,21 @@ void loadLastUpdateID() {
     long tmp = 0;
     EEPROM.get(EEPROM_LAST_UPDATE_ID, tmp);
     lastUpdateID = tmp;
+    EEPROM.end();
+}
+
+void saveLastUserChatID() {
+    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.put(EEPROM_LAST_USER_CHAT_ID, lastUserChatID);
+    EEPROM.commit();
+    EEPROM.end();
+}
+
+void loadLastUserChatID() {
+    EEPROM.begin(EEPROM_SIZE);
+    long tmp = 0;
+    EEPROM.get(EEPROM_LAST_USER_CHAT_ID, tmp);
+    lastUserChatID = tmp;
     EEPROM.end();
 }
 String urlencode(const String& str) {
@@ -122,8 +140,6 @@ bool sendMsg(String text, String chatId) {
   return sendViaTelegramFastBot(text, chatId);
 }
 // === Защита от дубликатов и спама ===
-long lastUserChatID = 0;
-unsigned long lastUserCommandTime = 0;
 const unsigned long COMMAND_COOLDOWN_MS = 2000; // 2 секунды между командами одного пользователя
 
 // === ID вашего бота — ОБЯЗАТЕЛЬНО ЗАМЕНИТЕ НА СВОЙ! ===
@@ -383,6 +399,7 @@ void setup()
     startupTime = millis();
     loadSettings();
     loadLastUpdateID();
+    loadLastUserChatID();
     serialToTelegram("📶 Попытка подключения к Wi-Fi:");
     serialToTelegram("SSID: " + wifiSSID);
     serialToTelegram("PASS: " + wifiPASS);
@@ -452,7 +469,11 @@ void setup()
     saveLastUpdateID();
 
     // --- 4. Сохраняем отправителя и время команды ---
-    lastUserChatID = msg.chatID.toInt();
+    long currentChatID = msg.chatID.toInt();
+    if (currentChatID != lastUserChatID) {
+        lastUserChatID = currentChatID;
+        saveLastUserChatID();
+    }
     lastUserCommandTime = millis();
 
     // --- 5. Ждём 5 сек после старта ---
