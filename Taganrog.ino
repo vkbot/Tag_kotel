@@ -9,7 +9,9 @@
 #include <ArduinoJson.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoOTA.h>
-#include "fastbott.h"
+#define FastBot FastBottBot
+#include <fastbott.h>
+#undef FastBot
 
 #define EEPROM_SIZE 512
 #define BOT_TOKEN "8079276277:AAHrqQKTo3vp76bcX2ekPw59dwWxRvTaEHg"
@@ -25,7 +27,7 @@ const unsigned long RELAY_MSG_INTERVAL = 60000; // интервал между �
 ESP8266WiFiMulti WiFiMulti;
 WiFiClient client;
 FastBot bot(BOT_TOKEN);
-FastBott fastBott;
+FastBottBot bott(BOT_TOKEN);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 Ticker autoReportTicker;
 Ticker narodmonTicker;
@@ -101,7 +103,11 @@ bool sendViaTelegramFastBot(const String& text, const String& chatId) {
 }
 
 bool sendViaTelegramFastBott(const String& text, const String& chatId) {
-  return fastBott.sendMessage(String(BOT_TOKEN), chatId, text, 10000);
+  String out = text;
+  out.replace("\r", "");
+  out.replace("\n\n", "\n");
+  bott.sendMessage(out, chatId);
+  return true;
 }
 
 bool sendMsg(String text, String chatId) {
