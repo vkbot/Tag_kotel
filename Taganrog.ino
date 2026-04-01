@@ -41,7 +41,7 @@ String wifiSSID = "";
 String wifiPASS = "";
 bool autoReportEnabled = false;
 uint32_t reportInterval = 600;
-bool useFastBottForTelegram = false;
+bool useAltTelegramLibrary = false;
 const char* TELEGRAM_API_HOST = "api.telegram.org";
 
 volatile bool needToSendAutoReport = false;
@@ -102,7 +102,7 @@ bool sendViaTelegramFastBot(const String& text, const String& chatId) {
   return true;
 }
 
-bool sendViaTelegramFastBott(const String& text, const String& chatId) {
+bool sendViaTelegramAlt(const String& text, const String& chatId) {
   String out = text;
   out.replace("\r", "");
   out.replace("\n\n", "\n");
@@ -112,8 +112,8 @@ bool sendViaTelegramFastBott(const String& text, const String& chatId) {
 
 bool sendMsg(String text, String chatId) {
   if (WiFi.status() != WL_CONNECTED) return false;
-  if (useFastBottForTelegram) {
-    return sendViaTelegramFastBott(text, chatId);
+  if (useAltTelegramLibrary) {
+    return sendViaTelegramAlt(text, chatId);
   }
   return sendViaTelegramFastBot(text, chatId);
 }
@@ -169,7 +169,7 @@ void loadSettings()
     EEPROM.get(4, reportInterval);
     uint8_t tgModeRaw = 0;
     EEPROM.get(EEPROM_TG_SEND_MODE, tgModeRaw);
-    useFastBottForTelegram = (tgModeRaw == 1);
+    useAltTelegramLibrary = (tgModeRaw == 1);
     char ssidBuf[32], passBuf[32];
     EEPROM.get(8, ssidBuf);
     EEPROM.get(40, passBuf);
@@ -211,7 +211,7 @@ void loadSettings()
 
     if (tgModeRaw != 0 && tgModeRaw != 1)
     {
-        useFastBottForTelegram = false;
+        useAltTelegramLibrary = false;
         saveSettings();
     }
 }
@@ -221,7 +221,7 @@ void saveSettings()
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.put(0, autoReportEnabled);
     EEPROM.put(4, reportInterval);
-    uint8_t tgModeRaw = useFastBottForTelegram ? 1 : 0;
+    uint8_t tgModeRaw = useAltTelegramLibrary ? 1 : 0;
     EEPROM.put(EEPROM_TG_SEND_MODE, tgModeRaw);
     char ssidBuf[32], passBuf[32];
     wifiSSID.toCharArray(ssidBuf, 32);
@@ -300,15 +300,6 @@ void sendToTelegram(String cid)
 }
 
 bool checkTelegramApiReachable()
-{
-    WiFiClient tcp;
-    tcp.setTimeout(3000);
-    bool ok = tcp.connect(TELEGRAM_API_HOST, 443);
-    tcp.stop();
-    return ok;
-}
-
-bool checkFastBottReachable()
 {
     WiFiClient tcp;
     tcp.setTimeout(3000);
@@ -588,7 +579,7 @@ status += "   • Текущее время: " + timeStr + "\n\n";
         status += "❄️ Термостат: **выключен**\n";
     }
   status += "   • Режим: " + String(workModeEnabled ? "РАБОТА" : "АВТО") + "\n";
-  status += "   • Канал Telegram: " + String(useFastBottForTelegram ? "FastBott" : "Прямой API") + "\n";
+  status += "   • Библиотека Telegram: " + String(useAltTelegramLibrary ? "ALT" : "STD") + "\n";
     // --- Вся "хуйня" про котёл — ТОЛЬКО если термостат включён ---
     if (thermostatEnabled)
     {
@@ -672,8 +663,8 @@ status += "   • Текущее время: " + timeStr + "\n\n";
         helpMsg += "/setinterval N — установить интервал автоотчёта (в секундах, минимум 30)\n";
         helpMsg += "/setwifi SSID PASSWORD — задать Wi-Fi\n";
         helpMsg += "/reboot — перезагрузка устройства\n";
-        helpMsg += "/tgmode api|fastbott — способ отправки в Telegram\n";
-        helpMsg += "/tgapicheck — проверить доступность Telegram API и FastBott\n";
+        helpMsg += "/tgmode std|alt — выбрать рабочую библиотеку Telegram\n";
+        helpMsg += "/tgapicheck — проверить доступность Telegram API\n";
         helpMsg += "/help — показать эту справку\n\n";
         helpMsg += "🔥 Термостат:\n";
         helpMsg += "/thermo on/off — включить/выключить термостат\n";
@@ -910,23 +901,21 @@ else if (cmd == "/auto") {
     workModeEnabled = false;
     sendMsg("✅ Режим: АВТО (по расписанию)", cid);
 }
-else if (cmd == "/tgmode api") {
-    useFastBottForTelegram = false;
+else if (cmd == "/tgmode std") {
+    useAltTelegramLibrary = false;
     saveSettings();
-    sendViaTelegramFastBot("✅ Отправка в Telegram: прямой API", cid);
+    sendViaTelegramFastBot("✅ Рабочая библиотека: STD", cid);
 }
-else if (cmd == "/tgmode fastbott" || cmd == "/tgmode cf") {
-    useFastBottForTelegram = true;
+else if (cmd == "/tgmode alt") {
+    useAltTelegramLibrary = true;
     saveSettings();
-    sendViaTelegramFastBott("✅ Отправка в Telegram: FastBott + urlencode", cid);
+    sendViaTelegramAlt("✅ Рабочая библиотека: ALT", cid);
     return;
 }
 else if (cmd == "/tgapicheck") {
     bool tgOk = checkTelegramApiReachable();
-    bool cfOk = checkFastBottReachable();
-    String res = "🧪 Проверка каналов:\n";
-    res += "• Telegram API: " + String(tgOk ? "✅ доступен" : "❌ недоступен") + "\n";
-    res += "• FastBott: " + String(cfOk ? "✅ доступен" : "❌ недоступен");
+    String res = "🧪 Проверка канала:\n";
+    res += "• Telegram API: " + String(tgOk ? "✅ доступен" : "❌ недоступен");
     sendMsg(res, cid);
 }
     else
