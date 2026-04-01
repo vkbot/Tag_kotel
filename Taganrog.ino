@@ -42,6 +42,7 @@ bool useCloudflareForTelegram = false;
 const char* CLOUDFLARE_WORKER_URL = "https://royal-river-71a9.dragonforceedge.workers.dev";
 const char* CLOUDFLARE_WORKER_HOST = "royal-river-71a9.dragonforceedge.workers.dev";
 const char* TELEGRAM_API_HOST = "api.telegram.org";
+const size_t MAX_CF_TEXT_LEN = 220; // длинные сообщения (например /status) шлём через API, чтобы не перегружать ESP URL-энкодингом
 
 // Выносим TLS-клиент из стека (на ESP8266 это снижает риск ребута при HTTPS в обработчике команд)
 static WiFiClientSecure tgSecureClient;
@@ -122,10 +123,14 @@ bool sendViaTelegramFastBot(const String& text, const String& chatId) {
 }
 
 bool sendViaCloudflareWorker(const String& text, const String& chatId) {
+
+  if (text.length() > MAX_CF_TEXT_LEN) return false;
   tgSecureClient.setInsecure();
   HTTPClient http;
   String base = String(CLOUDFLARE_WORKER_URL);
-  String encodedText = urlencode(urlencode(text));  // для CF worker нужен double-encoded text
+  String encodedText;
+  encodedText.reserve(text.length() * 3 + 8);
+  encodedText = urlencode(text);  // кодируем один раз
   String sep = base.endsWith("/") ? "" : "/";
   String url = base + sep + "bot" + String(BOT_TOKEN) + "/sendMessage?&text=" + encodedText + "&chat_id=" + chatId;
   http.setTimeout(8000);
