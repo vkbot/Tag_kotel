@@ -132,7 +132,7 @@ bool sendViaCloudflareWorker(const String& text, const String& chatId) {
   encodedText.reserve(text.length() * 3 + 8);
   encodedText = urlencode(text);  // кодируем один раз
   String sep = base.endsWith("/") ? "" : "/";
-  String url = base + sep + "bot" + String(BOT_TOKEN) + "/sendMessage?&text=" + encodedText + "&chat_id=" + chatId;
+  String url = base + sep + "bot" + String(BOT_TOKEN) + "/sendMessage?text=" + encodedText + "&chat_id=" + chatId;
   http.setTimeout(8000);
   if (!http.begin(tgSecureClient, url)) return false;
   int code = http.GET();
@@ -947,17 +947,27 @@ else if (cmd == "/tgmode api") {
     sendViaTelegramFastBot("✅ Отправка в Telegram: прямой API", cid);
 }
 else if (cmd == "/tgmode cf") {
-    // Переключаемся на CF только если тестовая отправка через worker реально прошла.
+    // Сначала пробуем реальную отправку через Worker.
     if (sendViaCloudflareWorker("✅ Канал Cloudflare проверен и активирован", cid)) {
         useCloudflareForTelegram = true;
         saveSettings();
         return;
-    } else {
-        useCloudflareForTelegram = false;
+    }
+
+    // Если отправка не прошла, но endpoint доступен по TCP, всё равно разрешаем переключение.
+    // Это помогает в случаях, когда тестовый запрос падает из-за временной ошибки/лимита,
+    // но пользователь хочет оставить режим Cloudflare.
+    if (checkCloudflareReachable()) {
+        useCloudflareForTelegram = true;
         saveSettings();
-        sendViaTelegramFastBot("❌ Не удалось отправить через Cloudflare Worker. Режим оставлен: прямой API", cid);
+        sendViaTelegramFastBot("⚠️ Cloudflare отвечает, но тестовое сообщение не прошло. Режим переключен на Cloudflare Worker.", cid);
         return;
     }
+
+    useCloudflareForTelegram = false;
+    saveSettings();
+    sendViaTelegramFastBot("❌ Не удалось отправить через Cloudflare Worker. Режим оставлен: прямой API", cid);
+    return;
 }
 else if (cmd == "/tgapicheck") {
     bool tgOk = checkTelegramApiReachable();
