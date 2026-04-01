@@ -40,6 +40,12 @@ uint32_t reportInterval = 600;
 bool useCloudflareForTelegram = false;
 
 const char* CLOUDFLARE_WORKER_URL = "https://royal-river-71a9.dragonforceedge.workers.dev";
+const char* CLOUDFLARE_WORKER_HOST = "royal-river-71a9.dragonforceedge.workers.dev";
+const char* TELEGRAM_API_HOST = "api.telegram.org";
+const size_t MAX_CF_TEXT_LEN = 220; // длинные сообщения (например /status) шлём через API, чтобы не перегружать ESP URL-энкодингом
+
+// Выносим TLS-клиент из стека (на ESP8266 это снижает риск ребута при HTTPS в обработчике команд)
+static WiFiClientSecure tgSecureClient;
 volatile bool needToSendAutoReport = false;
 bool sendtonm = false;
 unsigned long startupTime = 0;
@@ -117,18 +123,20 @@ bool sendViaTelegramFastBot(const String& text, const String& chatId) {
 }
 
 bool sendViaCloudflareWorker(const String& text, const String& chatId) {
-  WiFiClientSecure secureClient;
-  secureClient.setInsecure();
+  if (text.length() > MAX_CF_TEXT_LEN) return false;
+  tgSecureClient.setInsecure();
   HTTPClient http;
   String base = String(CLOUDFLARE_WORKER_URL);
-  String encodedText = urlencode(urlencode(text));  // для CF worker нужен double-encoded text
+  String encodedText;
+  encodedText.reserve(text.length() * 3 + 8);
+  encodedText = urlencode(urlencode(text));  // для CF worker нужен double-encoded text
   String sep = base.endsWith("/") ? "" : "/";
   String url = base + sep + "bot" + String(BOT_TOKEN) + "/sendMessage?&text=" + encodedText + "&chat_id=" + chatId;
   http.setTimeout(8000);
-  if (!http.begin(secureClient, url)) return false;
+  if (!http.begin(tgSecureClient, url)) return false;
   int code = http.GET();
   http.end();
-  return code > 0 && code < 500;
+  return code == HTTP_CODE_OK;
 }
 
 bool sendMsg(String text, String chatId) {
@@ -323,27 +331,20 @@ void sendToTelegram(String cid)
 
 bool checkTelegramApiReachable()
 {
-    WiFiClientSecure secureClient;
-    secureClient.setInsecure();
-    HTTPClient http;
-    String url = "https://api.telegram.org/bot" + String(BOT_TOKEN) + "/getMe";
-    http.setTimeout(6000);
-    if (!http.begin(secureClient, url)) return false;
-    int code = http.GET();
-    http.end();
-    return code == HTTP_CODE_OK;
+    WiFiClient tcp;
+    tcp.setTimeout(3000);
+    bool ok = tcp.connect(TELEGRAM_API_HOST, 443);
+    tcp.stop();
+    return ok;
 }
 
 bool checkCloudflareReachable()
 {
-    WiFiClientSecure secureClient;
-    secureClient.setInsecure();
-    HTTPClient http;
-    http.setTimeout(6000);
-    if (!http.begin(secureClient, String(CLOUDFLARE_WORKER_URL))) return false;
-    int code = http.GET();
-    http.end();
-    return code > 0 && code < 500;
+    WiFiClient tcp;
+    tcp.setTimeout(3000);
+    bool ok = tcp.connect(CLOUDFLARE_WORKER_HOST, 443);
+    tcp.stop();
+    return ok;
 }
 
 String formatHMSNow()
@@ -942,12 +943,20 @@ else if (cmd == "/auto") {
 else if (cmd == "/tgmode api") {
     useCloudflareForTelegram = false;
     saveSettings();
-    sendMsg("✅ Отправка в Telegram: прямой API", cid);
+    sendViaTelegramFastBot("✅ Отправка в Telegram: прямой API", cid);
 }
 else if (cmd == "/tgmode cf") {
-    useCloudflareForTelegram = true;
-    saveSettings();
-    sendMsg("✅ Отправка в Telegram: Cloudflare Worker", cid);
+    // Переключаемся на CF только если тестовая отправка через worker реально прошла.
+    if (sendViaCloudflareWorker("✅ Канал Cloudflare проверен и активирован", cid)) {
+        useCloudflareForTelegram = true;
+        saveSettings();
+        return;
+    } else {
+        useCloudflareForTelegram = false;
+        saveSettings();
+        sendViaTelegramFastBot("❌ Не удалось отправить через Cloudflare Worker. Режим оставлен: прямой API", cid);
+        return;
+    }
 }
 else if (cmd == "/tgapicheck") {
     bool tgOk = checkTelegramApiReachable();
