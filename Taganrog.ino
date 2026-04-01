@@ -89,23 +89,21 @@ String urlencode(const String& str) {
   return encoded;
 }
 
-bool sendViaTelegramApi(const String& text, const String& chatId) {
-  WiFiClientSecure secureClient;
-  secureClient.setInsecure();
-  HTTPClient http;
-  String url = "https://api.telegram.org/bot" + String(BOT_TOKEN) + "/sendMessage?chat_id=" + chatId + "&text=" + urlencode(text);
-  http.setTimeout(8000);
-  if (!http.begin(secureClient, url)) return false;
-  int code = http.GET();
-  http.end();
-  return code == HTTP_CODE_OK;
+bool sendViaTelegramFastBot(const String& text, const String& chatId) {
+  String out = text;
+  out.replace("\r", "");
+  out.replace("\n\n", "\n");
+  bot.sendMessage(out, chatId);
+  return true;
 }
 
 bool sendViaCloudflareWorker(const String& text, const String& chatId) {
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
   HTTPClient http;
-  String url = String(CLOUDFLARE_WORKER_URL) + "/?token=" + urlencode(BOT_TOKEN) + "&chat_id=" + urlencode(chatId) + "&text=" + urlencode(text);
+  String base = String(CLOUDFLARE_WORKER_URL);
+  String sep = base.endsWith("/") ? "?" : "/?";
+  String url = base + sep + "token=" + String(BOT_TOKEN) + "&chat_id=" + chatId + "&text=" + urlencode(text);
   http.setTimeout(8000);
   if (!http.begin(secureClient, url)) return false;
   int code = http.GET();
@@ -115,7 +113,11 @@ bool sendViaCloudflareWorker(const String& text, const String& chatId) {
 
 bool sendMsg(String text, String chatId) {
   if (WiFi.status() != WL_CONNECTED) return false;
-  return useCloudflareForTelegram ? sendViaCloudflareWorker(text, chatId) : sendViaTelegramApi(text, chatId);
+  if (useCloudflareForTelegram) {
+    if (sendViaCloudflareWorker(text, chatId)) return true;
+    return sendViaTelegramFastBot(text, chatId);
+  }
+  return sendViaTelegramFastBot(text, chatId);
 }
 // === Защита от дубликатов и спама ===
 long lastUserChatID = 0;
@@ -169,7 +171,9 @@ void loadSettings()
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.get(0, autoReportEnabled);
     EEPROM.get(4, reportInterval);
-    EEPROM.get(EEPROM_TG_SEND_MODE, useCloudflareForTelegram);
+    uint8_t tgModeRaw = 0;
+    EEPROM.get(EEPROM_TG_SEND_MODE, tgModeRaw);
+    useCloudflareForTelegram = (tgModeRaw == 1);
     char ssidBuf[32], passBuf[32];
     EEPROM.get(8, ssidBuf);
     EEPROM.get(40, passBuf);
@@ -208,6 +212,12 @@ void loadSettings()
     {
         reportInterval = 600;
     }
+
+    if (tgModeRaw != 0 && tgModeRaw != 1)
+    {
+        useCloudflareForTelegram = false;
+        saveSettings();
+    }
 }
 
 void saveSettings()
@@ -215,7 +225,8 @@ void saveSettings()
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.put(0, autoReportEnabled);
     EEPROM.put(4, reportInterval);
-    EEPROM.put(EEPROM_TG_SEND_MODE, useCloudflareForTelegram);
+    uint8_t tgModeRaw = useCloudflareForTelegram ? 1 : 0;
+    EEPROM.put(EEPROM_TG_SEND_MODE, tgModeRaw);
     char ssidBuf[32], passBuf[32];
     wifiSSID.toCharArray(ssidBuf, 32);
     wifiPASS.toCharArray(passBuf, 32);
