@@ -89,23 +89,19 @@ String urlencode(const String& str) {
   return encoded;
 }
 
-bool sendViaTelegramApi(const String& text, const String& chatId) {
-  WiFiClientSecure secureClient;
-  secureClient.setInsecure();
-  HTTPClient http;
-  String url = "https://api.telegram.org/bot" + String(BOT_TOKEN) + "/sendMessage?chat_id=" + chatId + "&text=" + urlencode(text);
-  http.setTimeout(8000);
-  if (!http.begin(secureClient, url)) return false;
-  int code = http.GET();
-  http.end();
-  return code == HTTP_CODE_OK;
+bool sendViaTelegramFastBot(const String& text, const String& chatId) {
+  String out = text;
+  out.replace("\r", "");
+  out.replace("\n\n", "\n");
+  bot.sendMessage(out, chatId);
+  return true;
 }
 
 bool sendViaCloudflareWorker(const String& text, const String& chatId) {
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
   HTTPClient http;
-  String url = String(CLOUDFLARE_WORKER_URL) + "/?token=" + urlencode(BOT_TOKEN) + "&chat_id=" + urlencode(chatId) + "&text=" + urlencode(text);
+  String url = String(CLOUDFLARE_WORKER_URL) + "/?token=" + String(BOT_TOKEN) + "&chat_id=" + chatId + "&text=" + urlencode(text);
   http.setTimeout(8000);
   if (!http.begin(secureClient, url)) return false;
   int code = http.GET();
@@ -115,7 +111,7 @@ bool sendViaCloudflareWorker(const String& text, const String& chatId) {
 
 bool sendMsg(String text, String chatId) {
   if (WiFi.status() != WL_CONNECTED) return false;
-  return useCloudflareForTelegram ? sendViaCloudflareWorker(text, chatId) : sendViaTelegramApi(text, chatId);
+  return useCloudflareForTelegram ? sendViaCloudflareWorker(text, chatId) : sendViaTelegramFastBot(text, chatId);
 }
 // === Защита от дубликатов и спама ===
 long lastUserChatID = 0;
