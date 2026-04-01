@@ -9,8 +9,8 @@
 #define BOILER_AVG_WINDOW_MS 120000UL
 #define TEMP_DRAFT_DROP_THRESHOLD 0.5f
 
-float boilerWeightedSum = 0.0f;
-unsigned long boilerWeightedTime = 0;
+float boilerSampleSum = 0.0f;
+uint32_t boilerSampleCount = 0;
 float boilerAvgTemp = NAN;
 unsigned long lastAcceptedSampleAt = 0;
 float lastAcceptedSampleTemp = NAN;
@@ -247,26 +247,17 @@ void updateAverageTemperature() {
 
   if (!isnan(lastAcceptedSampleTemp) && lastAcceptedSampleAt > 0) {
     unsigned long dt = now - lastAcceptedSampleAt;
-    if (dt <= BOILER_AVG_WINDOW_MS) {
-      boilerWeightedSum += lastAcceptedSampleTemp * (float)dt;
-      boilerWeightedTime += dt;
-      if (boilerWeightedTime > BOILER_AVG_WINDOW_MS) {
-        boilerWeightedTime = BOILER_AVG_WINDOW_MS;
-      }
-    }
+    boilerSampleSum += t;
+    boilerSampleCount++;
+    boilerAvgTemp = boilerSampleCount > 0 ? boilerSampleSum / (float)boilerSampleCount : t;
     narodMonWeightedSum += lastAcceptedSampleTemp * (float)dt;
     narodMonWeightedTime += dt;
-    boilerAvgTemp = boilerWeightedTime > 0 ? boilerWeightedSum / (float)boilerWeightedTime : t;
     narodMonAvgTemp = narodMonWeightedTime > 0 ? narodMonWeightedSum / (float)narodMonWeightedTime : t;
   } else {
+    boilerSampleSum = t;
+    boilerSampleCount = 1;
     boilerAvgTemp = t;
     narodMonAvgTemp = t;
-  }
-
-  if (boilerWeightedTime > BOILER_AVG_WINDOW_MS && boilerWeightedTime > 0) {
-    float k = (float)BOILER_AVG_WINDOW_MS / (float)boilerWeightedTime;
-    boilerWeightedSum *= k;
-    boilerWeightedTime = BOILER_AVG_WINDOW_MS;
   }
 
   lastAcceptedSampleTemp = t;

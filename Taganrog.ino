@@ -102,8 +102,9 @@ bool sendViaCloudflareWorker(const String& text, const String& chatId) {
   secureClient.setInsecure();
   HTTPClient http;
   String base = String(CLOUDFLARE_WORKER_URL);
-  String sep = base.endsWith("/") ? "?" : "/?";
-  String url = base + sep + "token=" + String(BOT_TOKEN) + "&chat_id=" + chatId + "&text=" + urlencode(text);
+  String encodedText = urlencode(urlencode(text));  // для CF worker нужен double-encoded text
+  String sep = base.endsWith("/") ? "" : "/";
+  String url = base + sep + "bot" + String(BOT_TOKEN) + "/sendMessage?&text=" + encodedText + "&chat_id=" + chatId;
   http.setTimeout(8000);
   if (!http.begin(secureClient, url)) return false;
   int code = http.GET();
