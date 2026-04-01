@@ -56,6 +56,7 @@ unsigned long wifiLostAt = 0;
 String wifiLostClock = "--:--:--";
 bool wifiWasDisconnected = false;
 bool wifiRecoveryPending = false;
+bool wifiLossNoticePending = false;
 
 void saveLastUpdateID() {
     EEPROM.begin(EEPROM_SIZE);
@@ -966,6 +967,7 @@ void loop()
         {
             wifiWasDisconnected = true;
             wifiRecoveryPending = true;
+            wifiLossNoticePending = true;
             wifiLostAt = millis();
             wifiLostClock = formatHMSNow();
         }
@@ -976,10 +978,17 @@ void loop()
     {
         String lostAt = wifiLostClock;
         String recoveredAt = formatHMSNow();
-        String msg = "📶 Wi‑Fi восстановлен.\n";
-        msg += "• Пропал: " + lostAt + "\n";
-        msg += "• Восстановлено (сообщение отправлено): " + recoveredAt;
-        if (sendMsg(msg, HELLO_CHAT_ID))
+
+        if (wifiLossNoticePending)
+        {
+            if (!sendMsg("📴 Wi‑Fi потерян в " + lostAt, HELLO_CHAT_ID))
+            {
+                return;
+            }
+            wifiLossNoticePending = false;
+        }
+
+        if (sendMsg("📶 Wi‑Fi восстановлен в " + recoveredAt, HELLO_CHAT_ID))
         {
             wifiRecoveryPending = false;
             wifiWasDisconnected = false;
