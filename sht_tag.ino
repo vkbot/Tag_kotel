@@ -9,15 +9,11 @@
 #include <ArduinoJson.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoOTA.h>
-#define FastBot FastBottBot
-#include <fastbott.h>
-#undef FastBot
+#include "boiler.h"
 
 #define EEPROM_SIZE 512
 #define BOT_TOKEN "8079276277:AAHrqQKTo3vp76bcX2ekPw59dwWxRvTaEHg"
 #define ADMIN_CHAT_ID "-4647981556"
-#define HELLO_CHAT_ID "-1001819803857"
-#include "boiler.h"
 // --- Для поиска boiler.local ---
 unsigned long lastRelayErrorTime = 0; // ← НОВАЯ ПЕРЕМЕННАЯ: время последней ошибки реле
 const unsigned long RELAY_ERROR_COOLDOWN = 5 * 60 * 1000; // 5 минут в мс
@@ -27,7 +23,6 @@ const unsigned long RELAY_MSG_INTERVAL = 60000; // интервал между �
 ESP8266WiFiMulti WiFiMulti;
 WiFiClient client;
 FastBot bot(BOT_TOKEN);
-FastBottBot bott(BOT_TOKEN);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 Ticker autoReportTicker;
 Ticker narodmonTicker;
@@ -41,29 +36,21 @@ String wifiSSID = "";
 String wifiPASS = "";
 bool autoReportEnabled = false;
 uint32_t reportInterval = 600;
-bool useAltTelegramLibrary = false;
-const char* TELEGRAM_API_HOST = "api.telegram.org";
-
 volatile bool needToSendAutoReport = false;
 bool sendtonm = false;
 unsigned long startupTime = 0;
 const unsigned long startupDelay = 5000;
 long lastMessageID = 0;
 long lastUpdateID = 0;
-long lastUserChatID = 0;
-unsigned long lastUserCommandTime = 0;
 float Temperature; 
 float Temperatur;       
 // Адрес в EEPROM для хранения lastMessageID (в пределах EEPROM_SIZE)
 #define EEPROM_LAST_UPDATE_ID 100  // адрес в EEPROM (например 100–103)
-#define EEPROM_TG_SEND_MODE 104
-#define EEPROM_LAST_USER_CHAT_ID 108
-
-unsigned long wifiLostAt = 0;
-String wifiLostClock = "--:--:--";
-bool wifiWasDisconnected = false;
-bool wifiRecoveryPending = false;
-bool wifiLossNoticePending = false;
+// Глобальные переменные для усреднения
+float tempSumForNarodMon = 0.0;
+uint8_t narodMonMeasurementCount = 0;
+unsigned long lastNarodMonMeasurementTime = 0;
+const unsigned long NARODMON_MEAS_INTERVAL = 100000; // 100 секунд
 
 void saveLastUpdateID() {
     EEPROM.begin(EEPROM_SIZE);
@@ -79,45 +66,30 @@ void loadLastUpdateID() {
     lastUpdateID = tmp;
     EEPROM.end();
 }
+String urlencode(const String& str) {
+  String encoded = "";
+  const char *cstr = str.c_str();
 
-void saveLastUserChatID() {
-    EEPROM.begin(EEPROM_SIZE);
-    EEPROM.put(EEPROM_LAST_USER_CHAT_ID, lastUserChatID);
-    EEPROM.commit();
-    EEPROM.end();
-}
-
-void loadLastUserChatID() {
-    EEPROM.begin(EEPROM_SIZE);
-    long tmp = 0;
-    EEPROM.get(EEPROM_LAST_USER_CHAT_ID, tmp);
-    lastUserChatID = tmp;
-    EEPROM.end();
-}
-bool sendViaTelegramFastBot(const String& text, const String& chatId) {
-  String out = text;
-  out.replace("\r", "");
-  out.replace("\n\n", "\n");
-  bot.sendMessage(out, chatId);
-  return true;
-}
-
-bool sendViaTelegramAlt(const String& text, const String& chatId) {
-  String out = text;
-  out.replace("\r", "");
-  out.replace("\n\n", "\n");
-  bott.sendMessage(out, chatId);
-  return true;
-}
-
-bool sendMsg(String text, String chatId) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-  if (useAltTelegramLibrary) {
-    return sendViaTelegramAlt(text, chatId);
+  for (size_t i = 0; i < strlen(cstr); i++) {
+    unsigned char c = cstr[i];
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' || c == '.' || c == '~') {
+      encoded += (char)c;
+    } else {
+      char buf[4];
+      sprintf(buf, "%%%02X", c);
+      encoded += buf;
+    }
   }
-  return sendViaTelegramFastBot(text, chatId);
+  return encoded;
+}
+
+void sendMsg(String text, String chatId) {
+  bot.sendMessage(urlencode(text), chatId);
 }
 // === Защита от дубликатов и спама ===
+long lastUserChatID = 0;
+unsigned long lastUserCommandTime = 0;
 const unsigned long COMMAND_COOLDOWN_MS = 2000; // 2 секунды между командами одного пользователя
 
 // === ID вашего бота — ОБЯЗАТЕЛЬНО ЗАМЕНИТЕ НА СВОЙ! ===
@@ -167,9 +139,6 @@ void loadSettings()
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.get(0, autoReportEnabled);
     EEPROM.get(4, reportInterval);
-    uint8_t tgModeRaw = 0;
-    EEPROM.get(EEPROM_TG_SEND_MODE, tgModeRaw);
-    useAltTelegramLibrary = (tgModeRaw == 1);
     char ssidBuf[32], passBuf[32];
     EEPROM.get(8, ssidBuf);
     EEPROM.get(40, passBuf);
@@ -208,12 +177,6 @@ void loadSettings()
     {
         reportInterval = 600;
     }
-
-    if (tgModeRaw != 0 && tgModeRaw != 1)
-    {
-        useAltTelegramLibrary = false;
-        saveSettings();
-    }
 }
 
 void saveSettings()
@@ -221,8 +184,6 @@ void saveSettings()
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.put(0, autoReportEnabled);
     EEPROM.put(4, reportInterval);
-    uint8_t tgModeRaw = useAltTelegramLibrary ? 1 : 0;
-    EEPROM.put(EEPROM_TG_SEND_MODE, tgModeRaw);
     char ssidBuf[32], passBuf[32];
     wifiSSID.toCharArray(ssidBuf, 32);
     wifiPASS.toCharArray(passBuf, 32);
@@ -239,12 +200,22 @@ bool isValidWiFiString(const String &str)
 
 void sendSHT31Data()
 {
-    float avgTemp = getNarodMonAverageTemp();
-    if (isnan(avgTemp))
+    if (narodMonMeasurementCount == 0)
     {
-        reportError("Нет данных для отправки средней температуры на NarodMon");
-        return;
+        // Нет данных — всё равно попробуем прочитать "свежие", чтобы не молчать
+        float t = sht31.readTemperature();
+        float h = sht31.readHumidity();
+        if (isnan(t) || isnan(h))
+        {
+            reportError("Нет данных для отправки на NarodMon");
+            return;
+        }
+        // Отправим текущие, но это fallback
+        tempSumForNarodMon = t;
+        narodMonMeasurementCount = 1;
     }
+
+    float avgTemp = tempSumForNarodMon / narodMonMeasurementCount;
     float h = sht31.readHumidity(); // влажность берём актуальную на момент отправки
 
     if (isnan(h))
@@ -272,13 +243,17 @@ void sendSHT31Data()
         delay(2000);
     }
 
-    if (!success)
+    if (success)
     {
-        reportError("Не удалось отправить данные на NarodMon.");
+        // ✅ Успешно — сбрасываем накопленное
+        tempSumForNarodMon = 0.0;
+        narodMonMeasurementCount = 0;
+        lastNarodMonMeasurementTime = millis(); // начинаем новый цикл
     }
     else
     {
-        resetNarodMonAverage();
+        reportError("Не удалось отправить данные на NarodMon.");
+        // ❌ Не сбрасываем — попробуем отправить накопленное снова в следующий раз
     }
 }
 
@@ -286,50 +261,14 @@ void sendToTelegram(String cid)
 {
     float t = sht31.readTemperature();
     float h = sht31.readHumidity();
-    float avgBoiler = getBoilerAverageTemp();
-    if (isnan(t) || isnan(h) || isnan(avgBoiler))
+    if (isnan(t) || isnan(h))
     {
         reportError("Ошибка чтения SHT31 при отчёте в Telegram.");
         return;
     }
 
-    String msg = "🌡 Текущая: " + String(t, 2) + " °C\n";
-    msg += "📊 Средняя текущая: " + String(avgBoiler, 2) + " °C\n";
-    msg += "💧 Влажность: " + String(h, 2) + " %";
+    String msg = "🌡 Температура: " + String(t, 2) + " °C\n💧 Влажность: " + String(h, 2) + " %";
     sendMsg(msg, cid);
-}
-
-bool checkTelegramApiReachable()
-{
-    WiFiClient tcp;
-    tcp.setTimeout(3000);
-    bool ok = tcp.connect(TELEGRAM_API_HOST, 443);
-    tcp.stop();
-    return ok;
-}
-
-String formatHMSNow()
-{
-    if (WiFi.status() == WL_CONNECTED)
-    {
-        timeClient.update();
-        int h = timeClient.getHours();
-        int m = timeClient.getMinutes();
-        int s = timeClient.getSeconds();
-        if (h >= 0 && h <= 23 && m >= 0 && m <= 59 && s >= 0 && s <= 59)
-        {
-            char buf[9];
-            snprintf(buf, sizeof(buf), "%02d:%02d:%02d", h, m, s);
-            return String(buf);
-        }
-    }
-    unsigned long sec = millis() / 1000UL;
-    unsigned int h = (sec / 3600UL) % 24;
-    unsigned int m = (sec / 60UL) % 60;
-    unsigned int s = sec % 60;
-    char buf[9];
-    snprintf(buf, sizeof(buf), "%02u:%02u:%02u", h, m, s);
-    return String(buf);
 }
 
 void setupOTA()
@@ -361,7 +300,6 @@ void setup()
     startupTime = millis();
     loadSettings();
     loadLastUpdateID();
-    loadLastUserChatID();
     serialToTelegram("📶 Попытка подключения к Wi-Fi:");
     serialToTelegram("SSID: " + wifiSSID);
     serialToTelegram("PASS: " + wifiPASS);
@@ -401,7 +339,7 @@ void setup()
     else
     {
         delay(5000);
-        sendMsg("ok", HELLO_CHAT_ID);
+        sendMsg("ok", "-1001819803857");
         narodmonTicker.attach(303, narodmonTick);
         // Синхронизация NTP
     timeClient.begin();
@@ -431,11 +369,7 @@ void setup()
     saveLastUpdateID();
 
     // --- 4. Сохраняем отправителя и время команды ---
-    long currentChatID = msg.chatID.toInt();
-    if (currentChatID != lastUserChatID) {
-        lastUserChatID = currentChatID;
-        saveLastUserChatID();
-    }
+    lastUserChatID = msg.chatID.toInt();
     lastUserCommandTime = millis();
 
     // --- 5. Ждём 5 сек после старта ---
@@ -542,8 +476,7 @@ void setup()
     // --- Датчик ---
     float t = sht31.readTemperature();
     float h = sht31.readHumidity();
-    float avgBoiler = getBoilerAverageTemp();
-    if (isnan(t) || isnan(h) || isnan(avgBoiler))
+    if (isnan(t) || isnan(h))
     {
         reportError("Ошибка чтения SHT31 при /status.");
         sendMsg("❌ Ошибка датчика", cid);
@@ -552,8 +485,7 @@ void setup()
 
     // --- Базовый статус (всегда) ---
     String status = "📟 **ПОЛНЫЙ СТАТУС** 📟\n\n";
-    status += "🌡 Текущая: " + String(t, 2) + " °C\n";
-    status += "📊 Средняя текущая: " + String(avgBoiler, 2) + " °C\n";
+    status += "🌡 Температура: " + String(t, 2) + " °C\n";
     status += "💧 Влажность: " + String(h, 2) + " %\n";
     status += "🌐 IP: " + WiFi.localIP().toString() + "\n";
     status += uptimeMsg + "\n";
@@ -579,7 +511,6 @@ status += "   • Текущее время: " + timeStr + "\n\n";
         status += "❄️ Термостат: **выключен**\n";
     }
   status += "   • Режим: " + String(workModeEnabled ? "РАБОТА" : "АВТО") + "\n";
-  status += "   • Библиотека Telegram: " + String(useAltTelegramLibrary ? "ALT" : "STD") + "\n";
     // --- Вся "хуйня" про котёл — ТОЛЬКО если термостат включён ---
     if (thermostatEnabled)
     {
@@ -625,12 +556,10 @@ status += "   • Текущее время: " + timeStr + "\n\n";
         status += "   • Гистерезис: " + String(hysteresis, 1) + " °C\n";
 
         // Макс. время работы
-        status += "   • Макс. работа: " + String(getEffectiveWorkDurationMinutes()) + " мин";
-        if (temporaryBoostActive) status += " (временный режим)\n"; else status += "\n";
+        status += "   • Макс. работа: " + String(workDurationMinutes) + " мин\n";
         
         // Мин. пауза между включениями 
-        status += "   • Мин. пауза: " + String(getEffectiveMinStartInterval() / 60000UL) + " мин";
-        if (temporaryBoostActive) status += " (временный режим)\n"; else status += "\n";
+        status += "   • Мин. пауза: " + String(minStartInterval / 60000UL) + " мин\n";
         
         // Зоны
         status += "   • Зон в расписании: " + String(zoneCount) + "\n";
@@ -663,8 +592,6 @@ status += "   • Текущее время: " + timeStr + "\n\n";
         helpMsg += "/setinterval N — установить интервал автоотчёта (в секундах, минимум 30)\n";
         helpMsg += "/setwifi SSID PASSWORD — задать Wi-Fi\n";
         helpMsg += "/reboot — перезагрузка устройства\n";
-        helpMsg += "/tgmode std|alt — выбрать рабочую библиотеку Telegram\n";
-        helpMsg += "/tgapicheck — проверить доступность Telegram API\n";
         helpMsg += "/help — показать эту справку\n\n";
         helpMsg += "🔥 Термостат:\n";
         helpMsg += "/thermo on/off — включить/выключить термостат\n";
@@ -836,10 +763,8 @@ else if (cmd == "/forceoff") {
     int val = rawText.substring(13).toInt();
     if (val >= 1 && val <= 60) {
         extern uint16_t workDurationMinutes;
-        extern uint16_t baseWorkDurationMinutes;
         extern void saveWorkDuration();
         workDurationMinutes = val;
-        baseWorkDurationMinutes = val;
         saveWorkDuration();
         sendMsg("⏱ Макс. время работы: " + String(workDurationMinutes) + " мин", cid);
     } else {
@@ -850,7 +775,6 @@ else if (cmd.startsWith("/setminpause ")) {
     int val = rawText.substring(13).toInt();
     if (val >= 1 && val <= 60) {
         minStartInterval = val * 60 * 1000UL; // переводим минуты в миллисекунды
-        baseMinStartInterval = minStartInterval;
         saveMinStartInterval();
         sendMsg("⏸ Мин. пауза между включениями: " + String(val) + " мин", cid);
     } else {
@@ -892,31 +816,13 @@ else if (cmd.startsWith("/work ")) {
     workEndMinute = m2;
     workScheduled = true;
     workModeEnabled = true; // включаем режим работы
-    activateTemporaryBoost();
 
-    sendMsg("✅ Включён режим РАБОТА (22°C) с " + startStr + " до " + endStr + ". На 1 час: работа 14 мин, пауза 1 мин.", cid);
+    sendMsg("✅ Включён режим РАБОТА (22°C) с " + startStr + " до " + endStr, cid);
 }
 
 else if (cmd == "/auto") {
     workModeEnabled = false;
     sendMsg("✅ Режим: АВТО (по расписанию)", cid);
-}
-else if (cmd == "/tgmode std") {
-    useAltTelegramLibrary = false;
-    saveSettings();
-    sendViaTelegramFastBot("✅ Рабочая библиотека: STD", cid);
-}
-else if (cmd == "/tgmode alt") {
-    useAltTelegramLibrary = true;
-    saveSettings();
-    sendViaTelegramAlt("✅ Рабочая библиотека: ALT", cid);
-    return;
-}
-else if (cmd == "/tgapicheck") {
-    bool tgOk = checkTelegramApiReachable();
-    String res = "🧪 Проверка канала:\n";
-    res += "• Telegram API: " + String(tgOk ? "✅ доступен" : "❌ недоступен");
-    sendMsg(res, cid);
 }
     else
     {
@@ -935,6 +841,23 @@ void loop()
         String tgid = "619084238";
         sendToTelegram(tgid);
     }
+      // === Накопление измерений для NarodMon каждые 100 сек ===
+    if (WiFi.status() == WL_CONNECTED && 
+        millis() - lastNarodMonMeasurementTime >= NARODMON_MEAS_INTERVAL && 
+        narodMonMeasurementCount < 3)
+    {
+        float t = sht31.readTemperature();
+        if (!isnan(t))
+        {
+            tempSumForNarodMon += t;
+            narodMonMeasurementCount++;
+            lastNarodMonMeasurementTime = millis();
+        }
+        else
+        {
+            reportError("Ошибка чтения SHT31 при фоновом измерении для NarodMon");
+        }
+    }
     if (sendtonm)
     {
         sendtonm = false;
@@ -942,40 +865,10 @@ void loop()
     }
     ArduinoOTA.handle();
     boilerLoop();
-    wl_status_t wifiStatus = WiFi.status();
-    if (wifiStatus != WL_CONNECTED)
+     if (WiFi.status() != WL_CONNECTED)
     {
-        if (!wifiWasDisconnected)
-        {
-            wifiWasDisconnected = true;
-            wifiRecoveryPending = true;
-            wifiLossNoticePending = true;
-            wifiLostAt = millis();
-            wifiLostClock = formatHMSNow();
-        }
-        WiFiMulti.run();
-        delay(500);
-    }
-    else if (wifiRecoveryPending)
-    {
-        String lostAt = wifiLostClock;
-        String recoveredAt = formatHMSNow();
-
-        if (wifiLossNoticePending)
-        {
-            if (!sendMsg("📴 Wi‑Fi потерян в " + lostAt, HELLO_CHAT_ID))
-            {
-                return;
-            }
-            wifiLossNoticePending = false;
-        }
-
-        if (sendMsg("📶 Wi‑Fi восстановлен в " + recoveredAt, HELLO_CHAT_ID))
-        {
-            wifiRecoveryPending = false;
-            wifiWasDisconnected = false;
-            wifiLostAt = 0;
-            wifiLostClock = "--:--:--";
-        }
+        serialToTelegram("📡 Wi-Fi разорван. Попытка переподключения...");
+        WiFiMulti.run(); // Попробует подключиться снова
+        delay(1000);
     }
 }

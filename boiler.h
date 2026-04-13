@@ -5,22 +5,11 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 // === Защита от сквозняка ===
-#define TEMP_SAMPLE_INTERVAL_MS 5000UL
-#define BOILER_AVG_WINDOW_MS 120000UL
-#define TEMP_DRAFT_DROP_THRESHOLD 0.5f
-
-const uint8_t BOILER_SAMPLE_CAPACITY = (BOILER_AVG_WINDOW_MS / TEMP_SAMPLE_INTERVAL_MS) + 2;
-float boilerSamples[BOILER_SAMPLE_CAPACITY] = {0.0f};
-unsigned long boilerSampleTimes[BOILER_SAMPLE_CAPACITY] = {0};
-uint8_t boilerSampleHead = 0;
-uint8_t boilerSampleCount = 0;
-float boilerAvgTemp = NAN;
-float lastAcceptedSampleTemp = NAN;
-
-float narodMonWeightedSum = 0.0f;
-unsigned long narodMonWeightedTime = 0;
-float narodMonAvgTemp = NAN;
-unsigned long lastSensorPoll = 0;
+#define TEMP_HISTORY_SIZE 4
+float tempHistory[TEMP_HISTORY_SIZE] = { NAN, NAN, NAN, NAN };
+uint8_t tempHistoryIndex = 0;
+unsigned long lastTempReadTime = 0;
+float lastAvgTemp = NAN; // актуальное среднее
 // === ВНЕШНИЕ ЗАВИСИМОСТИ (из sht_tag.ino) ===
 extern void serialToTelegram(const String &message);
 extern void reportError(const String &message);
@@ -57,8 +46,7 @@ extern Adafruit_SHT31 sht31;
 extern FastBot bot;
 // === Объявляем urlencode и sendMsg ===
 String urlencode(const String &str);
-bool sendMsg(String text, String chatId);
-
+void sendMsg(String text, String chatId);
 // === Глобальные переменные ===
 bool thermostatEnabled = false;
 bool workModeEnabled = false; // false = auto (расписание), true = work (22°C)
@@ -72,10 +60,6 @@ unsigned long lastRelayOnTime = 0;        // ← НОВОЕ: время посл
 bool relayIsRunning = false;              // флаг: реле активно (включено и работает)
 uint16_t workDurationMinutes = 4;         // макс. время работы (настраивается)
 uint32_t minStartInterval = 10 * 60 * 1000UL;
-uint16_t baseWorkDurationMinutes = 4;
-uint32_t baseMinStartInterval = 10 * 60 * 1000UL;
-bool temporaryBoostActive = false;
-unsigned long temporaryBoostUntil = 0;
 TimeSlot timeZones[MAX_ZONES];
 uint8_t zoneCount = 0;
 bool zonesChanged = false;
@@ -202,92 +186,6 @@ bool sendRelayCommand(bool on) {
   }
 }
 
-uint16_t getEffectiveWorkDurationMinutes() {
-  return temporaryBoostActive ? 14 : baseWorkDurationMinutes;
-}
-
-uint32_t getEffectiveMinStartInterval() {
-  return temporaryBoostActive ? 60 * 1000UL : baseMinStartInterval;
-}
-
-void activateTemporaryBoost() {
-  temporaryBoostActive = true;
-  temporaryBoostUntil = millis() + 60UL * 60UL * 1000UL;
-}
-
-void maybeFinishTemporaryBoost() {
-  if (!temporaryBoostActive) return;
-  if ((long)(millis() - temporaryBoostUntil) >= 0) {
-    temporaryBoostActive = false;
-    sendMsg("✅ Временные настройки завершены: длительность и пауза возвращены к пользовательским.", String(lastUserChatID));
-  }
-}
-
-float getBoilerAverageTemp() {
-  return boilerAvgTemp;
-}
-
-float getNarodMonAverageTemp() {
-  return narodMonAvgTemp;
-}
-
-void resetNarodMonAverage() {
-  narodMonWeightedSum = 0.0f;
-  narodMonWeightedTime = 0;
-  narodMonAvgTemp = boilerAvgTemp;
-}
-
-void updateAverageTemperature() {
-  unsigned long now = millis();
-  if (now - lastSensorPoll < TEMP_SAMPLE_INTERVAL_MS) return;
-  lastSensorPoll = now;
-
-  float t = sht31.readTemperature();
-  if (isnan(t)) return;
-
-  if (!isnan(lastAcceptedSampleTemp) && (lastAcceptedSampleTemp - t) >= TEMP_DRAFT_DROP_THRESHOLD) {
-    return; // защита от резкого провала из-за сквозняка
-  }
-
-  // Добавляем новый сэмпл в кольцевой буфер
-  boilerSamples[boilerSampleHead] = t;
-  boilerSampleTimes[boilerSampleHead] = now;
-  boilerSampleHead = (boilerSampleHead + 1) % BOILER_SAMPLE_CAPACITY;
-  if (boilerSampleCount < BOILER_SAMPLE_CAPACITY) {
-    boilerSampleCount++;
-  }
-
-  // Вычисляем среднюю только по окну последних BOILER_AVG_WINDOW_MS
-  float sum = 0.0f;
-  uint8_t validCount = 0;
-  for (uint8_t i = 0; i < boilerSampleCount; i++) {
-    uint8_t idx = (boilerSampleHead + BOILER_SAMPLE_CAPACITY - 1 - i) % BOILER_SAMPLE_CAPACITY;
-    unsigned long sampleTime = boilerSampleTimes[idx];
-    if (now - sampleTime > BOILER_AVG_WINDOW_MS) {
-      break;
-    }
-    sum += boilerSamples[idx];
-    validCount++;
-  }
-
-  if (validCount > 0) {
-    boilerAvgTemp = sum / (float)validCount;
-  } else {
-    boilerAvgTemp = t;
-  }
-
-  if (!isnan(lastAcceptedSampleTemp)) {
-    unsigned long dt = TEMP_SAMPLE_INTERVAL_MS;
-    narodMonWeightedSum += t * (float)dt;
-    narodMonWeightedTime += dt;
-    narodMonAvgTemp = narodMonWeightedTime > 0 ? narodMonWeightedSum / (float)narodMonWeightedTime : boilerAvgTemp;
-  } else {
-    narodMonAvgTemp = boilerAvgTemp;
-  }
-
-  lastAcceptedSampleTemp = t;
-}
-
 void updateRelay() {
   // Если термостат выключен — выключаем реле
   if (!thermostatEnabled) {
@@ -308,34 +206,25 @@ float instantTemp = sht31.readTemperature();
 if (isnan(instantTemp)) return;
 
 // Для включения — средняя температура за 2 мин
-float t = boilerAvgTemp;
+float t = lastAvgTemp;
 if (isnan(t)) t = instantTemp; // fallback при отсутствии истории
 
   float target = getCurrentTargetTemp();
-  uint16_t effectiveWorkDuration = getEffectiveWorkDurationMinutes();
-  uint32_t effectiveMinStartInterval = getEffectiveMinStartInterval();
-
-  // Для включения берём более "тёплое" значение из мгновенной и средней температуры,
-  // чтобы старая холодная средняя не провоцировала лишний запуск, когда в комнате уже нагрелось.
-  float tempForOn = t;
-  if (!isnan(instantTemp) && instantTemp > tempForOn) {
-    tempForOn = instantTemp;
-  }
 
   // === Режим: реле ВКЛЮЧЕНО ===
   if (relayIsRunning) {
     bool shouldTurnOff = false;
     String reason = "";
 
-    // Условие 1: достигли целевой температуры по мгновенному значению (без гистерезиса!)
-    if (instantTemp >= target) {
+    // Условие 1: достигли целевой температуры (без гистерезиса!)
+    if (t >= target) {
       shouldTurnOff = true;
-      reason = "достигнута цель (мгновенная T)";
+      reason = "достигнута цель";
     }
     // Условие 2: истекло максимальное время работы
-    else if (millis() - relayStartTime >= effectiveWorkDuration * 60 * 1000UL) {
+    else if (millis() - relayStartTime >= workDurationMinutes * 60 * 1000UL) {
       shouldTurnOff = true;
-      reason = "таймер (" + String(effectiveWorkDuration) + " мин)";
+      reason = "таймер (" + String(workDurationMinutes) + " мин)";
     }
 
     if (shouldTurnOff) {
@@ -345,7 +234,7 @@ if (isnan(t)) t = instantTemp; // fallback при отсутствии исто�
         relayIsRunning = false;
         lastRelayTurnOffTime = millis();
         sendMsg(
-          "❄️ Реле выключено: " + reason + ". Tмгн=" + String(instantTemp, 1) + "°C, Tср=" + String(t, 1) + "°C, цель=" + String(target, 1) + "°C",
+          "❄️ Реле выключено: " + reason + ". T=" + String(t, 1) + "°C, цель=" + String(target, 1) + "°C",
           String(lastUserChatID)
         );
       } else {
@@ -358,8 +247,8 @@ if (isnan(t)) t = instantTemp; // fallback при отсутствии исто�
   }
 
   // === Режим: реле ВЫКЛЮЧЕНО ===
-  bool cooldownPassed = (millis() - lastRelayTurnOffTime >= effectiveMinStartInterval);
-  bool needsHeat = (tempForOn < target - hysteresis); // гистерезис ТОЛЬКО при включении
+  bool cooldownPassed = (millis() - lastRelayTurnOffTime >= minStartInterval);
+  bool needsHeat = (t < target - hysteresis); // гистерезис ТОЛЬКО при включении
 
   if (cooldownPassed && needsHeat) {
     bool success = sendRelayCommand(true);
@@ -368,21 +257,41 @@ if (isnan(t)) t = instantTemp; // fallback при отсутствии исто�
       relayIsRunning = true;
       relayStartTime = millis();
       lastRelayOnTime = millis();
-      String notifyChat = lastUserChatID != 0 ? String(lastUserChatID) : String(HELLO_CHAT_ID);
       sendMsg(
-        "🔥 Включено: Tконтр=" + String(tempForOn, 1) + "°C (Tмгн=" + String(instantTemp, 1) + "°C, Tср=" + String(t, 1) + "°C) < " + String(target - hysteresis, 1) + "°C",
-        notifyChat
+        "🔥 Включено: T=" + String(t, 1) + "°C < " + String(target - hysteresis, 1) + "°C",
+        String(lastUserChatID)
       );
     } else {
       if (shouldSendError()) {
-        serialToTelegram("⚠️ Не удалось включить реле. Tконтр=" + String(tempForOn,1) + ", Tмгн=" + String(instantTemp,1) + ", цель=" + String(target,1));
+        serialToTelegram("⚠️ Не удалось включить реле. T=" + String(t,1) + ", цель=" + String(target,1));
       }
     }
   }
 }
+void updateAverageTemperature() {
+  unsigned long now = millis();
+  if (now - lastTempReadTime < 30000UL) return; // каждые 30 сек
+
+  float t = sht31.readTemperature();
+  if (!isnan(t)) {
+    tempHistory[tempHistoryIndex] = t;
+    tempHistoryIndex = (tempHistoryIndex + 1) % TEMP_HISTORY_SIZE;
+    lastTempReadTime = now;
+
+    // Считаем среднее (игнорируем NAN)
+    float sum = 0.0;
+    uint8_t count = 0;
+    for (int i = 0; i < TEMP_HISTORY_SIZE; i++) {
+      if (!isnan(tempHistory[i])) {
+        sum += tempHistory[i];
+        count++;
+      }
+    }
+    lastAvgTemp = (count > 0) ? sum / count : t;
+  }
+}
 void boilerLoop() {
   updateAverageTemperature(); // <-- добавлено
-  maybeFinishTemporaryBoost();
   static unsigned long lastUpdate = 0;
   static unsigned long lastSave = 0;
 
@@ -431,7 +340,6 @@ void setupBoilerCommands() {
     workDurationMinutes = 4;
     EEPROM.put(EEPROM_WORK_DURATION, workDurationMinutes);
   }
-  baseWorkDurationMinutes = workDurationMinutes;
 
   // Загрузка минимального интервала между включениями
   EEPROM.get(EEPROM_MIN_START_INTERVAL, minStartInterval);
@@ -439,7 +347,6 @@ void setupBoilerCommands() {
     minStartInterval = 10 * 60 * 1000UL; // 10 минут по умолчанию
     EEPROM.put(EEPROM_MIN_START_INTERVAL, minStartInterval);
   }
-  baseMinStartInterval = minStartInterval;
 
   EEPROM.commit();
   EEPROM.end();
