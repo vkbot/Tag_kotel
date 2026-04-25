@@ -1,0 +1,11 @@
+name = "tag-kotel-worker"
+main = "worker.js"
+compatibility_date = "2026-04-13"
+
+[[kv_namespaces]]
+binding = "BOT_STATE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+preview_id = "REPLACE_WITH_KV_PREVIEW_ID"
+
+[vars]
+DEFAULT_REPORT_INTERVAL_MINUTES = "10"
